@@ -43,6 +43,10 @@ def build_dashboard():
         "next_slate_id": get_next_slate_index(slates),
         "sleeper": sleeper,
         "sleeper_error": sleeper_error,
+        "espn": espn,
+        "espn_error": espn_error,
+        "manual_yahoo": manual_yahoo,
+        "manual_yahoo_error": manual_yahoo_error,
         "yahoo": {
             "connected": yahoo_connected,
             "status": (
@@ -51,8 +55,4 @@ def build_dashboard():
                 else "Not connected"
             ),
         },
-        "manual_yahoo": manual_yahoo,
-        "manual_yahoo_error": manual_yahoo_error,
-        "espn": espn,
-        "espn_error": espn_error,
     }
