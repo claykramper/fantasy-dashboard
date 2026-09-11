@@ -1,8 +1,8 @@
-let dashboardData=null;let selectedSlates=new Set();let showCompleted=false;
+let dashboardData=null;let selectedSlates=new Set();let showCompleted=false;let selectedWeekKey=null;
 
 async function loadDashboard(){try{const r=await fetch('/api/dashboard',{cache:'no-store'});const d=await r.json();if(!r.ok)throw new Error(d.error||'Dashboard error');dashboardData=d;initializeSelectedSlates();renderDashboard()}catch(e){document.getElementById('content').innerHTML=`<div class="error">${escapeHtml(e.message)}</div>`}}
 
-function initializeSelectedSlates(){if(selectedSlates.size===0&&dashboardData.next_slate_id!==null)selectedSlates.add(dashboardData.next_slate_id)}
+function initializeSelectedSlates(){const weekKey=dashboardData.fantasy_week_key||'';if(selectedWeekKey!==weekKey){selectedWeekKey=weekKey;selectedSlates.clear();showCompleted=false}if(selectedSlates.size===0&&dashboardData.next_slate_id!==null)selectedSlates.add(dashboardData.next_slate_id)}
 
 function toggleSlate(id){selectedSlates.has(id)?selectedSlates.delete(id):selectedSlates.add(id);renderDashboard()}
 

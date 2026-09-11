@@ -12,7 +12,7 @@ from yahoo_manual import build_manual_yahoo
 
 def build_dashboard():
     nfl_games = get_nfl_schedule()
-    slates = build_slate_data(nfl_games)
+    slates, fantasy_week_key = build_slate_data(nfl_games)
     game_lookup = build_game_lookup(nfl_games)
 
     sleeper = None
@@ -40,6 +40,7 @@ def build_dashboard():
 
     return {
         "slates": slates,
+        "fantasy_week_key": fantasy_week_key,
         "next_slate_id": get_next_slate_index(slates),
         "sleeper": sleeper,
         "sleeper_error": sleeper_error,
