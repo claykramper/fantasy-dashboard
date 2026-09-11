@@ -1,11 +1,21 @@
 import os
 import time
+import secrets
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
+from urllib.parse import urlencode
 
 import requests
 
-from flask import Flask, jsonify, render_template_string
+from flask import (
+    Flask,
+    jsonify,
+    render_template_string,
+    redirect,
+    request,
+    session,
+)
+
 from dotenv import load_dotenv
 
 
@@ -15,6 +25,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ------------------------------------------------------------
+# ESPN
+# ------------------------------------------------------------
+
 ESPN_SWID = os.getenv("ESPN_SWID")
 ESPN_S2 = os.getenv("ESPN_S2")
 LEAGUE_ID = os.getenv("ESPN_LEAGUE_ID")
@@ -22,6 +36,20 @@ SEASON = os.getenv("ESPN_SEASON")
 
 # Your ESPN account owner GUID.
 MY_OWNER_GUID = "{DE1DCE7E-4046-4158-A37D-10DD7C1923A0}"
+
+
+# ------------------------------------------------------------
+# YAHOO
+# ------------------------------------------------------------
+
+YAHOO_CLIENT_ID = os.getenv("YAHOO_CLIENT_ID")
+YAHOO_CLIENT_SECRET = os.getenv("YAHOO_CLIENT_SECRET")
+YAHOO_REDIRECT_URI = os.getenv("YAHOO_REDIRECT_URI")
+
+
+# ============================================================
+# ESPN URLS
+# ============================================================
 
 ESPN_FANTASY_URL = (
     f"https://lm-api-reads.fantasy.espn.com/apis/v3/games/ffl/"
@@ -45,10 +73,250 @@ ESPN_PARAMS = [
     ("view", "kona_player_info"),
 ]
 
+
+# ============================================================
+# YAHOO OAUTH URLS
+# ============================================================
+
+YAHOO_AUTH_URL = (
+    "https://api.login.yahoo.com/oauth2/request_auth"
+)
+
+YAHOO_TOKEN_URL = (
+    "https://api.login.yahoo.com/oauth2/get_token"
+)
+
+
+# ============================================================
+# APP
+# ============================================================
+
 # Display NFL times in Central Time.
 LOCAL_TIMEZONE = ZoneInfo("America/Chicago")
 
 app = Flask(__name__)
+
+# Used for the temporary OAuth state value.
+#
+# For Render, set FLASK_SECRET_KEY as an environment variable.
+# If it is not present, a temporary random key is generated.
+app.secret_key = os.getenv(
+    "FLASK_SECRET_KEY",
+    secrets.token_hex(32),
+)
+
+
+# ============================================================
+# YAHOO OAUTH
+# ============================================================
+
+@app.route("/yahoo/login")
+def yahoo_login():
+
+    if not YAHOO_CLIENT_ID:
+        return (
+            "YAHOO_CLIENT_ID is not configured.",
+            500,
+        )
+
+    if not YAHOO_CLIENT_SECRET:
+        return (
+            "YAHOO_CLIENT_SECRET is not configured.",
+            500,
+        )
+
+    if not YAHOO_REDIRECT_URI:
+        return (
+            "YAHOO_REDIRECT_URI is not configured.",
+            500,
+        )
+
+    # Generate a random state value to protect the OAuth
+    # authorization request from CSRF.
+    state = secrets.token_urlsafe(32)
+
+    session["yahoo_oauth_state"] = state
+
+    params = {
+        "client_id": YAHOO_CLIENT_ID,
+        "redirect_uri": YAHOO_REDIRECT_URI,
+        "response_type": "code",
+        "state": state,
+    }
+
+    authorization_url = (
+        f"{YAHOO_AUTH_URL}?"
+        f"{urlencode(params)}"
+    )
+
+    return redirect(
+        authorization_url
+    )
+
+
+@app.route("/yahoo/callback")
+def yahoo_callback():
+
+    # Yahoo may return an OAuth error instead of a code.
+    error = request.args.get(
+        "error"
+    )
+
+    if error:
+
+        return jsonify({
+            "error": error,
+            "description": request.args.get(
+                "error_description"
+            ),
+        }), 400
+
+
+    # --------------------------------------------------------
+    # Validate OAuth state
+    # --------------------------------------------------------
+
+    returned_state = request.args.get(
+        "state"
+    )
+
+    expected_state = session.pop(
+        "yahoo_oauth_state",
+        None
+    )
+
+    if (
+        not returned_state
+        or not expected_state
+        or returned_state != expected_state
+    ):
+
+        return jsonify({
+            "error": "Invalid Yahoo OAuth state."
+        }), 400
+
+
+    # --------------------------------------------------------
+    # Authorization code
+    # --------------------------------------------------------
+
+    code = request.args.get(
+        "code"
+    )
+
+    if not code:
+
+        return jsonify({
+            "error":
+                "No Yahoo authorization code received."
+        }), 400
+
+
+    # --------------------------------------------------------
+    # Exchange authorization code for tokens
+    # --------------------------------------------------------
+
+    try:
+
+        response = requests.post(
+            YAHOO_TOKEN_URL,
+
+            data={
+                "grant_type":
+                    "authorization_code",
+
+                "redirect_uri":
+                    YAHOO_REDIRECT_URI,
+
+                "code":
+                    code,
+            },
+
+            auth=(
+                YAHOO_CLIENT_ID,
+                YAHOO_CLIENT_SECRET,
+            ),
+
+            timeout=20,
+        )
+
+    except requests.RequestException as error:
+
+        return jsonify({
+            "error":
+                "Could not contact Yahoo token endpoint.",
+
+            "details":
+                str(error),
+        }), 502
+
+
+    if not response.ok:
+
+        return jsonify({
+            "error":
+                "Yahoo token exchange failed.",
+
+            "status_code":
+                response.status_code,
+
+            "details":
+                response.text,
+        }), 400
+
+
+    try:
+
+        token_data = response.json()
+
+    except ValueError:
+
+        return jsonify({
+            "error":
+                "Yahoo returned an invalid token response.",
+
+            "details":
+                response.text,
+        }), 400
+
+
+    # --------------------------------------------------------
+    # Do NOT display the actual tokens.
+    #
+    # We are intentionally only confirming that Yahoo
+    # returned them. Token persistence will be handled when
+    # we connect the actual Yahoo Fantasy API.
+    # --------------------------------------------------------
+
+    return jsonify({
+
+        "message":
+            "Yahoo authentication successful!",
+
+        "token_type":
+            token_data.get(
+                "token_type"
+            ),
+
+        "expires_in":
+            token_data.get(
+                "expires_in"
+            ),
+
+        "has_access_token":
+            bool(
+                token_data.get(
+                    "access_token"
+                )
+            ),
+
+        "has_refresh_token":
+            bool(
+                token_data.get(
+                    "refresh_token"
+                )
+            ),
+    })
 
 
 # ============================================================
@@ -147,12 +415,16 @@ def get_nfl_schedule():
                     "id": str(
                         team.get("id")
                     ),
-                    "abbreviation": team.get(
-                        "abbreviation"
-                    ),
-                    "display_name": team.get(
-                        "displayName"
-                    ),
+
+                    "abbreviation":
+                        team.get(
+                            "abbreviation"
+                        ),
+
+                    "display_name":
+                        team.get(
+                            "displayName"
+                        ),
                 }
 
                 if competitor.get(
@@ -200,16 +472,27 @@ def get_nfl_schedule():
             )
 
             games.append({
-                "id": event.get("id"),
-                "kickoff": kickoff,
-                "home": home,
-                "away": away,
-                "status": type_data.get(
-                    "name"
-                ),
-                "status_detail": type_data.get(
-                    "detail"
-                ),
+                "id":
+                    event.get("id"),
+
+                "kickoff":
+                    kickoff,
+
+                "home":
+                    home,
+
+                "away":
+                    away,
+
+                "status":
+                    type_data.get(
+                        "name"
+                    ),
+
+                "status_detail":
+                    type_data.get(
+                        "detail"
+                    ),
             })
 
     return games
@@ -240,8 +523,11 @@ def group_games_into_slates(games):
         if not slates:
 
             slates.append({
-                "kickoff": game["kickoff"],
-                "games": [game],
+                "kickoff":
+                    game["kickoff"],
+
+                "games":
+                    [game],
             })
 
             continue
@@ -262,8 +548,11 @@ def group_games_into_slates(games):
         else:
 
             slates.append({
-                "kickoff": game["kickoff"],
-                "games": [game],
+                "kickoff":
+                    game["kickoff"],
+
+                "games":
+                    [game],
             })
 
     return slates
@@ -332,6 +621,10 @@ def format_game_time(
 
     return local_kickoff.strftime(
         "%-I:%M %p"
+        )
+
+    return local_kickoff.strftime(
+        "%-I:%M %p"
     )
 
 
@@ -364,37 +657,66 @@ def build_slate_data(
         )
 
         output.append({
-            "id": index,
-            "label": format_slate_label(
-                kickoff
-            ),
-            "date": local_kickoff.date().isoformat(),
-            "kickoff": local_kickoff.isoformat(),
-            "timestamp": kickoff.timestamp(),
-            "is_upcoming": is_upcoming,
+
+            "id":
+                index,
+
+            "label":
+                format_slate_label(
+                    kickoff
+                ),
+
+            "date":
+                local_kickoff.date().isoformat(),
+
+            "kickoff":
+                local_kickoff.isoformat(),
+
+            "timestamp":
+                kickoff.timestamp(),
+
+            "is_upcoming":
+                is_upcoming,
+
             "games": [
+
                 {
-                    "id": game["id"],
-                    "away": game["away"][
-                        "abbreviation"
-                    ],
-                    "home": game["home"][
-                        "abbreviation"
-                    ],
-                    "away_id": game["away"]["id"],
-                    "home_id": game["home"]["id"],
-                    "kickoff": (
-                        game["kickoff"]
-                        .astimezone(
-                            LOCAL_TIMEZONE
-                        )
-                        .isoformat()
-                    ),
-                    "game_time": format_game_time(
-                        game["kickoff"]
-                    ),
+                    "id":
+                        game["id"],
+
+                    "away":
+                        game["away"][
+                            "abbreviation"
+                        ],
+
+                    "home":
+                        game["home"][
+                            "abbreviation"
+                        ],
+
+                    "away_id":
+                        game["away"]["id"],
+
+                    "home_id":
+                        game["home"]["id"],
+
+                    "kickoff":
+                        (
+                            game["kickoff"]
+                            .astimezone(
+                                LOCAL_TIMEZONE
+                            )
+                            .isoformat()
+                        ),
+
+                    "game_time":
+                        format_game_time(
+                            game["kickoff"]
+                        ),
                 }
-                for game in slate["games"]
+
+                for game
+                in slate["games"]
             ],
         })
 
@@ -563,32 +885,46 @@ def get_players(team):
         )
 
         players.append({
-            "player_id": entry.get(
-                "playerId"
-            ),
-            "name": player.get(
-                "fullName"
-            ),
-            "slot_id": slot_id,
-            "slot": SLOT_NAMES.get(
-                slot_id,
-                "BENCH"
-            ),
-            "starter": (
-                slot_id in SLOT_NAMES
-            ),
-            "injury_status": player.get(
-                "injuryStatus"
-            ),
-            "pro_team_id": str(
+
+            "player_id":
+                entry.get(
+                    "playerId"
+                ),
+
+            "name":
                 player.get(
-                    "proTeamId"
+                    "fullName"
+                ),
+
+            "slot_id":
+                slot_id,
+
+            "slot":
+                SLOT_NAMES.get(
+                    slot_id,
+                    "BENCH"
+                ),
+
+            "starter":
+                (
+                    slot_id in SLOT_NAMES
+                ),
+
+            "injury_status":
+                player.get(
+                    "injuryStatus"
+                ),
+
+            "pro_team_id":
+                str(
+                    player.get(
+                        "proTeamId"
+                    )
                 )
-            )
-            if player.get(
-                "proTeamId"
-            ) is not None
-            else None,
+                if player.get(
+                    "proTeamId"
+                ) is not None
+                else None,
         })
 
     return players
@@ -597,8 +933,12 @@ def get_players(team):
 def get_starters(players):
 
     starters = [
+
         player
-        for player in players
+
+        for player
+        in players
+
         if player["starter"]
     ]
 
@@ -802,17 +1142,33 @@ def get_player_score(
     if actual is not None:
 
         return {
-            "points": actual,
-            "projected": projection,
-            "actual": actual,
-            "status": "LOCKED",
+
+            "points":
+                actual,
+
+            "projected":
+                projection,
+
+            "actual":
+                actual,
+
+            "status":
+                "LOCKED",
         }
 
     return {
-        "points": projection,
-        "projected": projection,
-        "actual": None,
-        "status": "PROJECTED",
+
+        "points":
+            projection,
+
+        "projected":
+            projection,
+
+        "actual":
+            None,
+
+        "status":
+            "PROJECTED",
     }
 
 
@@ -844,45 +1200,69 @@ def build_game_lookup(
         )
 
         lookup[home_id] = {
-            "team": game["home"][
-                "abbreviation"
-            ],
-            "opponent": game["away"][
-                "abbreviation"
-            ],
-            "opponent_id": away_id,
-            "home": True,
-            "kickoff": local_kickoff,
-            "game_time": format_game_time(
-                game["kickoff"]
-            ),
-            "game_status": game[
-                "status"
-            ],
-            "status_detail": game[
-                "status_detail"
-            ],
+
+            "team":
+                game["home"][
+                    "abbreviation"
+                ],
+
+            "opponent":
+                game["away"][
+                    "abbreviation"
+                ],
+
+            "opponent_id":
+                away_id,
+
+            "home":
+                True,
+
+            "kickoff":
+                local_kickoff,
+
+            "game_time":
+                format_game_time(
+                    game["kickoff"]
+                ),
+
+            "game_status":
+                game["status"],
+
+            "status_detail":
+                game["status_detail"],
         }
 
         lookup[away_id] = {
-            "team": game["away"][
-                "abbreviation"
-            ],
-            "opponent": game["home"][
-                "abbreviation"
-            ],
-            "opponent_id": home_id,
-            "home": False,
-            "kickoff": local_kickoff,
-            "game_time": format_game_time(
-                game["kickoff"]
-            ),
-            "game_status": game[
-                "status"
-            ],
-            "status_detail": game[
-                "status_detail"
-            ],
+
+            "team":
+                game["away"][
+                    "abbreviation"
+                ],
+
+            "opponent":
+                game["home"][
+                    "abbreviation"
+                ],
+
+            "opponent_id":
+                home_id,
+
+            "home":
+                False,
+
+            "kickoff":
+                local_kickoff,
+
+            "game_time":
+                format_game_time(
+                    game["kickoff"]
+                ),
+
+            "game_status":
+                game["status"],
+
+            "status_detail":
+                game["status_detail"],
         }
 
     return lookup
@@ -920,10 +1300,18 @@ def get_player_game_info(
         }
 
     return {
-        "team": game["team"],
-        "opponent": game["opponent"],
-        "game_time": game["game_time"],
-        "game_status": game["game_status"],
+
+        "team":
+            game["team"],
+
+        "opponent":
+            game["opponent"],
+
+        "game_time":
+            game["game_time"],
+
+        "game_status":
+            game["game_status"],
     }
 
 
@@ -964,6 +1352,7 @@ def build_team_data(
         ]
 
         if injury is None:
+
             injury = ""
 
         game_info = get_player_game_info(
@@ -972,44 +1361,76 @@ def build_team_data(
         )
 
         output_players.append({
-            "name": player["name"],
-            "slot": player["slot"],
-            "points": points,
-            "projected": score[
-                "projected"
-            ],
-            "actual": score[
-                "actual"
-            ],
-            "status": score[
-                "status"
-            ],
-            "injury": injury,
-            "pro_team_id": player[
-                "pro_team_id"
-            ],
-            "nfl_team": game_info[
-                "team"
-            ],
-            "opponent": game_info[
-                "opponent"
-            ],
-            "game_time": game_info[
-                "game_time"
-            ],
-            "game_status": game_info[
-                "game_status"
-            ],
+
+            "name":
+                player["name"],
+
+            "slot":
+                player["slot"],
+
+            "points":
+                points,
+
+            "projected":
+                score["projected"],
+
+            "actual":
+                score["actual"],
+
+            "status":
+                score["status"],
+
+            "injury":
+                injury,
+
+            "pro_team_id":
+                player[
+                    "pro_team_id"
+                ],
+
+            "nfl_team":
+                game_info[
+                    "team"
+                ],
+
+            "opponent":
+                game_info[
+                    "opponent"
+                ],
+
+            "game_time":
+                game_info[
+                    "game_time"
+                ],
+
+            "game_status":
+                game_info[
+                    "game_status"
+                ],
         })
 
     return {
-        "id": team["id"],
-        "name": team["name"],
-        "abbrev": team["abbrev"],
-        "league": "ESPN",
-        "theme": "espn",
-        "players": output_players,
-        "total": total,
+
+        "id":
+            team["id"],
+
+        "name":
+            team["name"],
+
+        "abbrev":
+            team["abbrev"],
+
+        "league":
+            "ESPN",
+
+        "theme":
+            "espn",
+
+        "players":
+            output_players,
+
+        "total":
+            total,
     }
 
 
@@ -1076,15 +1497,29 @@ def build_dashboard():
     )
 
     return {
-        "week": current_period,
-        "updated": time.strftime(
-            "%I:%M:%S %p"
-        ),
-        "my_team": my_data,
-        "opponent": opponent_data,
-        "difference": difference,
-        "slates": slates,
-        "next_slate_id": next_slate_id,
+
+        "week":
+            current_period,
+
+        "updated":
+            time.strftime(
+                "%I:%M:%S %p"
+            ),
+
+        "my_team":
+            my_data,
+
+        "opponent":
+            opponent_data,
+
+        "difference":
+            difference,
+
+        "slates":
+            slates,
+
+        "next_slate_id":
+            next_slate_id,
     }
 
 
@@ -1104,7 +1539,8 @@ def api_dashboard():
     except Exception as error:
 
         return jsonify({
-            "error": str(error)
+            "error":
+                str(error)
         }), 500
 
 
