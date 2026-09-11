@@ -294,12 +294,51 @@ def team_name(roster, users):
     return f"Roster {roster.get('roster_id')}"
 
 
+def player_game_finished(player):
+    status = str(player.get("game_status") or "").upper()
+    detail = str(player.get("status_detail") or "").upper()
+    return (
+        "FINAL" in status
+        or "COMPLETED" in status
+        or "FINAL" in detail
+        or "END" in detail
+    )
+
+
 def calculate_actual_total(players):
-    return round(sum(number(p.get("actual")) for p in players if p.get("actual") is not None), 2)
+    return round(
+        sum(
+            number(p.get("actual"))
+            for p in players
+            if p.get("actual") is not None
+        ),
+        2,
+    )
 
 
 def calculate_projected_total(players):
-    return round(sum(number(p.get("projected")) for p in players if p.get("projected") is not None), 2)
+    """
+    Expected final team score:
+
+    FINAL game  -> actual points
+    LIVE game   -> current platform projection
+    NOT STARTED -> platform projection
+
+    This prevents finished players from contributing their old
+    pregame projection to the team projected total.
+    """
+    total = 0.0
+
+    for player in players:
+        actual = player.get("actual")
+        projected = player.get("projected")
+
+        if player_game_finished(player) and actual is not None:
+            total += number(actual)
+        elif projected is not None:
+            total += number(projected)
+
+    return round(total, 2)
 
 
 def build_sleeper_matchup(game_lookup):

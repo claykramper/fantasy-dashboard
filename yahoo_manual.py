@@ -354,10 +354,18 @@ def optimize_lineup(players):
         if lowest["projection"] - next_player["projection"] <= CLOSE_THRESHOLD:
             alternatives.append({**next_player, "slot": label, "close_to": lowest["name"]})
 
+    projected_total = 0.0
+
+    for player in starters:
+        if player.get("finished") and player.get("actual") is not None:
+            projected_total += num(player["actual"])
+        else:
+            projected_total += num(player.get("projection"))
+
     return {
         "starters": starters,
         "alternatives": alternatives,
-        "projected_total": round(sum(p["projection"] for p in starters), 2),
+        "projected_total": round(projected_total, 2),
     }
 
 
