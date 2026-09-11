@@ -103,11 +103,27 @@ SLEEPER_API_URL = (
     "https://api.sleeper.app/v1"
 )
 
-# Sleeper tells developers to cache this because the full
-# player database is roughly 5 MB and should not be requested
-# repeatedly.
+# Separate Sleeper projections endpoint.
+#
+# This is different from the normal v1 league API.
+# Sleeper projection data includes raw projected stat
+# categories as well as pts_ppr / pts_half_ppr / pts_std.
+SLEEPER_PROJECTIONS_URL = (
+    "https://api.sleeper.com/projections/nfl"
+)
+
+SLEEPER_STATS_URL = (
+    "https://api.sleeper.app/v1/stats/nfl"
+)
+
+# Sleeper tells developers to cache the player database.
 SLEEPER_PLAYER_CACHE = None
 SLEEPER_PLAYER_CACHE_TIME = 0
+
+# Cache weekly projections/stats so a dashboard refresh does
+# not hammer Sleeper.
+SLEEPER_PROJECTION_CACHE = {}
+SLEEPER_STATS_CACHE = {}
 
 
 # ============================================================
@@ -526,6 +542,91 @@ def sleeper_get(path):
     return response.json()
 
 
+def sleeper_projection_get(
+    season,
+    week,
+):
+
+    cache_key = (
+        str(season),
+        str(week),
+    )
+
+    cached = SLEEPER_PROJECTION_CACHE.get(
+        cache_key
+    )
+
+    if cached:
+
+        # Cache projections for 5 minutes.
+        if time.time() - cached["time"] < 300:
+            return cached["data"]
+
+    response = requests.get(
+        f"{SLEEPER_PROJECTIONS_URL}/"
+        f"{season}/{week}",
+        params={
+            "season_type":
+                "regular"
+        },
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    SLEEPER_PROJECTION_CACHE[
+        cache_key
+    ] = {
+        "time": time.time(),
+        "data": data,
+    }
+
+    return data
+
+
+def sleeper_stats_get(
+    season,
+    week,
+):
+
+    cache_key = (
+        str(season),
+        str(week),
+    )
+
+    cached = SLEEPER_STATS_CACHE.get(
+        cache_key
+    )
+
+    if cached:
+
+        # Stats can change during a game.
+        # Cache only briefly.
+        if time.time() - cached["time"] < 60:
+            return cached["data"]
+
+    response = requests.get(
+        f"{SLEEPER_STATS_URL}/"
+        f"regular/{season}/{week}",
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    SLEEPER_STATS_CACHE[
+        cache_key
+    ] = {
+        "time": time.time(),
+        "data": data,
+    }
+
+    return data
+
+
 def get_sleeper_user():
 
     return sleeper_get(
@@ -585,7 +686,6 @@ def get_sleeper_players():
 
     now = time.time()
 
-    # Cache for 24 hours.
     if (
         SLEEPER_PLAYER_CACHE is not None
         and
@@ -613,30 +713,15 @@ def choose_sleeper_league(
             "No 2026 Sleeper NFL leagues found."
         )
 
-    # Prefer an active league.
     for league in leagues:
-        if league.get("status") == "in_season":
+
+        if league.get(
+            "status"
+        ) == "in_season":
+
             return league
 
-    # Otherwise use the first 2026 league.
     return leagues[0]
-
-
-def sleeper_team_name(
-    roster_id,
-    users,
-):
-
-    for user in users:
-
-        # Sleeper's users endpoint associates users
-        # with their roster through user_id.
-        #
-        # We resolve the owner using the roster separately
-        # in build_sleeper_matchup.
-        pass
-
-    return f"Roster {roster_id}"
 
 
 def get_sleeper_team_label(
@@ -691,9 +776,591 @@ def sleeper_position(
     ) or ""
 
 
+# ============================================================
+# SLEEPER SCORING
+# ============================================================
+
+def stat_value(
+    stats,
+    key
+):
+
+    value = stats.get(
+        key
+    )
+
+    if value is None:
+        return 0.0
+
+    try:
+        return float(value)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return 0.0
+
+
+def scoring_value(
+    scoring,
+    key
+):
+
+    value = scoring.get(
+        key
+    )
+
+    if value is None:
+        return 0.0
+
+    try:
+        return float(value)
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return 0.0
+
+
+def calculate_sleeper_points(
+    stats,
+    scoring,
+    player_position=None,
+):
+
+    if not stats:
+        return None
+
+    if not scoring:
+        return None
+
+    total = 0.0
+
+    # --------------------------------------------------------
+    # Direct stat categories
+    #
+    # Most Sleeper scoring categories use the exact same
+    # key in the weekly stats object and scoring_settings.
+    # --------------------------------------------------------
+
+    direct_keys = [
+
+        # Passing
+        "pass_yd",
+        "pass_td",
+        "pass_fd",
+        "pass_2pt",
+        "pass_int",
+        "pass_int_td",
+        "pass_cmp",
+        "pass_inc",
+        "pass_att",
+        "pass_sack",
+
+        # Rushing
+        "rush_yd",
+        "rush_td",
+        "rush_fd",
+        "rush_2pt",
+        "rush_att",
+
+        # Receiving
+        "rec",
+        "rec_yd",
+        "rec_td",
+        "rec_fd",
+        "rec_2pt",
+
+        # Fumbles
+        "fum",
+        "fum_lost",
+
+        # Defense
+        "def_td",
+        "def_fum_td",
+        "def_int_td",
+        "def_sack",
+        "def_qb_hit",
+        "def_tkl",
+        "def_tkl_solo",
+        "def_tkl_ast",
+        "def_tkl_loss",
+        "def_int",
+        "def_pass_def",
+        "def_fum_rec",
+        "def_safe",
+        "def_ff",
+        "def_blk_kick",
+
+        # Alternate Sleeper defensive names
+        "sack",
+        "int",
+        "safe",
+        "ff",
+        "tkl_loss",
+        "idp_qb_hit",
+        "idp_qbhit",
+        "idp_tkl",
+        "idp_tkl_solo",
+        "idp_tkl_ast",
+        "idp_tkl_loss",
+        "idp_int",
+        "idp_pass_def",
+        "idp_pd",
+        "idp_fum_rec",
+        "idp_ff",
+        "idp_safe",
+        "idp_sack",
+
+        # Special teams
+        "st_td",
+        "st_ff",
+        "st_fum_rec",
+        "kr_yd",
+        "pr_yd",
+        "st_tkl",
+        "st_tkl_solo",
+        "st_tkl_ast",
+
+        # Kicking
+        "fgm",
+        "fgm_0_19",
+        "fgm_20_29",
+        "fgm_30_39",
+        "fgm_40_49",
+        "fgm_50p",
+        "fgm_yds",
+        "fgmiss",
+        "fgmiss_0_19",
+        "fgmiss_20_29",
+        "fgmiss_30_39",
+        "fgmiss_40_49",
+        "fgmiss_50p",
+        "xpm",
+        "xpmiss",
+
+        # Defense scoring
+        "pts_allow",
+        "yds_allow",
+
+        # Receiving/rushing tier stats
+        "rec_0_4",
+        "rec_5_9",
+        "rec_10_19",
+        "rec_20_29",
+        "rec_30_39",
+        "rec_40p",
+
+        # Big plays
+        "pass_cmp_40p",
+        "pass_td_40p",
+        "pass_td_50p",
+        "rush_40p",
+        "rush_td_40p",
+        "rush_td_50p",
+        "rec_40p",
+        "rec_td_40p",
+        "rec_td_50p",
+
+        # First downs
+        "pass_fd",
+        "rush_fd",
+        "rec_fd",
+
+        # Bonus threshold stats
+        "pass_cmp_25",
+        "rush_att_20",
+
+        # Combined yardage
+        "rush_rec_yd_100",
+        "rush_rec_yd_200",
+
+        # Game yardage thresholds
+        "rush_yd_100",
+        "rush_yd_200",
+        "rec_yd_100",
+        "rec_yd_200",
+        "pass_yd_300",
+        "pass_yd_400",
+    ]
+
+    for key in direct_keys:
+
+        total += (
+            stat_value(stats, key)
+            *
+            scoring_value(scoring, key)
+        )
+
+    # --------------------------------------------------------
+    # Sleeper uses some shorter scoring keys for defensive
+    # categories.
+    # --------------------------------------------------------
+
+    aliases = {
+
+        "sack":
+            "def_sack",
+
+        "int":
+            "def_int",
+
+        "safe":
+            "def_safe",
+
+        "ff":
+            "def_ff",
+
+        "tkl_loss":
+            "def_tkl_loss",
+
+        "fum_rec":
+            "def_fum_rec",
+
+        "blk_kick":
+            "def_blk_kick",
+    }
+
+    for stat_key, scoring_key in aliases.items():
+
+        if scoring_value(
+            scoring,
+            scoring_key
+        ) != 0:
+
+            total += (
+                stat_value(
+                    stats,
+                    stat_key
+                )
+                *
+                scoring_value(
+                    scoring,
+                    scoring_key
+                )
+            )
+
+    # --------------------------------------------------------
+    # Position-specific reception bonuses.
+    #
+    # Sleeper applies these based on the player's official
+    # primary position, not the fantasy slot.
+    # --------------------------------------------------------
+
+    position = (
+        player_position or ""
+    ).upper()
+
+    if position == "RB":
+
+        total += (
+            stat_value(
+                stats,
+                "rec"
+            )
+            *
+            scoring_value(
+                scoring,
+                "bonus_rec_rb"
+            )
+        )
+
+    elif position == "WR":
+
+        total += (
+            stat_value(
+                stats,
+                "rec"
+            )
+            *
+            scoring_value(
+                scoring,
+                "bonus_rec_wr"
+            )
+        )
+
+    elif position == "TE":
+
+        total += (
+            stat_value(
+                stats,
+                "rec"
+            )
+            *
+            scoring_value(
+                scoring,
+                "bonus_rec_te"
+            )
+        )
+
+    # --------------------------------------------------------
+    # Big-play bonus aliases.
+    #
+    # Sleeper's raw projection/stat objects can use the
+    # shorter stat name while scoring_settings can contain
+    # the bonus_ prefix.
+    # --------------------------------------------------------
+
+    big_play_aliases = {
+
+        "pass_cmp_40p":
+            "bonus_pass_cmp_40p",
+
+        "pass_td_40p":
+            "bonus_pass_td_40p",
+
+        "pass_td_50p":
+            "bonus_pass_td_50p",
+
+        "rush_40p":
+            "bonus_rush_40p",
+
+        "rush_td_40p":
+            "bonus_rush_td_40p",
+
+        "rush_td_50p":
+            "bonus_rush_td_50p",
+
+        "rec_40p":
+            "bonus_rec_40p",
+
+        "rec_td_40p":
+            "bonus_rec_td_40p",
+
+        "rec_td_50p":
+            "bonus_rec_td_50p",
+    }
+
+    for stat_key, scoring_key in big_play_aliases.items():
+
+        bonus = scoring_value(
+            scoring,
+            scoring_key
+        )
+
+        if bonus == 0:
+
+            # Some Sleeper data/settings use the short
+            # version instead.
+            bonus = scoring_value(
+                scoring,
+                stat_key
+            )
+
+        if bonus != 0:
+
+            total += (
+                stat_value(
+                    stats,
+                    stat_key
+                )
+                *
+                bonus
+            )
+
+    # --------------------------------------------------------
+    # Yardage bonus aliases
+    # --------------------------------------------------------
+
+    yardage_aliases = {
+
+        "pass_yd_300":
+            "bonus_pass_yd_300",
+
+        "pass_yd_400":
+            "bonus_pass_yd_400",
+
+        "rush_yd_100":
+            "bonus_rush_yd_100",
+
+        "rush_yd_200":
+            "bonus_rush_yd_200",
+
+        "rec_yd_100":
+            "bonus_rec_yd_100",
+
+        "rec_yd_200":
+            "bonus_rec_yd_200",
+
+        "rush_rec_yd_100":
+            "bonus_rush_rec_yd_100",
+
+        "rush_rec_yd_200":
+            "bonus_rush_rec_yd_200",
+
+        "pass_cmp_25":
+            "bonus_pass_cmp_25",
+
+        "rush_att_20":
+            "bonus_rush_att_20",
+    }
+
+    for stat_key, scoring_key in yardage_aliases.items():
+
+        bonus = scoring_value(
+            scoring,
+            scoring_key
+        )
+
+        if bonus != 0:
+
+            total += (
+                stat_value(
+                    stats,
+                    stat_key
+                )
+                *
+                bonus
+            )
+
+    return round(
+        total,
+        2
+    )
+
+
+# ============================================================
+# SLEEPER PLAYER DATA
+# ============================================================
+
+def get_sleeper_player_score(
+    player_id,
+    player,
+    projection_data,
+    actual_data,
+    scoring,
+):
+
+    player_id = str(
+        player_id
+    )
+
+    position = sleeper_position(
+        player
+    )
+
+    projection = (
+        projection_data.get(
+            player_id
+        )
+        if isinstance(
+            projection_data,
+            dict
+        )
+        else None
+    )
+
+    actual = (
+        actual_data.get(
+            player_id
+        )
+        if isinstance(
+            actual_data,
+            dict
+        )
+        else None
+    )
+
+    projected_points = None
+    actual_points = None
+
+    # --------------------------------------------------------
+    # Projection
+    # --------------------------------------------------------
+
+    if projection:
+
+        projected_points = (
+            calculate_sleeper_points(
+                projection,
+                scoring,
+                position,
+            )
+        )
+
+        # If the scoring engine could not produce a number,
+        # use Sleeper's own standard scoring value as a
+        # fallback rather than displaying nothing.
+        if projected_points is None:
+
+            if scoring_value(
+                scoring,
+                "rec"
+            ) == 1:
+
+                projected_points = projection.get(
+                    "pts_ppr"
+                )
+
+            elif scoring_value(
+                scoring,
+                "rec"
+            ) == 0:
+
+                projected_points = projection.get(
+                    "pts_std"
+                )
+
+            else:
+
+                projected_points = projection.get(
+                    "pts_half_ppr"
+                )
+
+    # --------------------------------------------------------
+    # Actual
+    # --------------------------------------------------------
+
+    if actual:
+
+        # Sleeper stats can contain a GP field.
+        gp = stat_value(
+            actual,
+            "gp"
+        )
+
+        if gp > 0:
+
+            actual_points = (
+                calculate_sleeper_points(
+                    actual,
+                    scoring,
+                    position,
+                )
+            )
+
+            if actual_points is None:
+
+                actual_points = (
+                    actual.get(
+                        "pts_ppr"
+                    )
+                )
+
+    return {
+        "projected":
+            (
+                float(projected_points)
+                if projected_points is not None
+                else None
+            ),
+
+        "actual":
+            (
+                float(actual_points)
+                if actual_points is not None
+                else None
+            ),
+    }
+
+
 def build_sleeper_players(
     matchup,
     players,
+    projection_data,
+    actual_data,
+    scoring,
+    game_lookup,
 ):
 
     output = []
@@ -703,39 +1370,70 @@ def build_sleeper_players(
         []
     )
 
-    for index, player_id in enumerate(
-        starters
-    ):
+    for player_id in starters:
 
-        player_id = str(player_id)
+        player_id = str(
+            player_id
+        )
 
         player = players.get(
             player_id
         )
 
-        # D/ST entries such as "KC" are not always
-        # represented as normal player objects.
+        # D/ST entries such as "KC" are represented by the
+        # NFL abbreviation rather than a normal player object.
         if not player:
 
+            score = {
+                "projected":
+                    None,
+                "actual":
+                    None,
+            }
+
+            game_info = get_player_game_info_generic(
+                player_id,
+                game_lookup,
+            )
+
             output.append({
+
                 "name":
                     f"{player_id} D/ST",
+
                 "slot":
                     "D/ST",
+
                 "player_id":
                     player_id,
+
                 "nfl_team":
                     player_id,
+
                 "opponent":
-                    "",
+                    game_info["opponent"],
+
                 "game_time":
-                    "",
+                    game_info["game_time"],
+
+                "game_status":
+                    game_info["game_status"],
+
                 "points":
-                    None,
+                    score["projected"],
+
+                "projected":
+                    score["projected"],
+
+                "actual":
+                    score["actual"],
+
                 "injury":
                     "",
+
                 "status":
                     "PROJECTED",
+
                 "pro_team_id":
                     player_id,
             })
@@ -745,6 +1443,65 @@ def build_sleeper_players(
         team = player.get(
             "team"
         ) or ""
+
+        score = get_sleeper_player_score(
+            player_id,
+            player,
+            projection_data,
+            actual_data,
+            scoring,
+        )
+
+        game_info = get_player_game_info_generic(
+            team,
+            game_lookup,
+        )
+
+        if score["actual"] is not None:
+
+            # Once actual points exist, the points field is
+            # actual because this is what contributes to the
+            # live/finished score.
+
+            points = score["actual"]
+
+            game_status = (
+                game_info["game_status"]
+                or ""
+            ).upper()
+
+            if game_status in (
+                "STATUS_SCHEDULED",
+                "SCHEDULED",
+            ):
+
+                status = "PROJECTED"
+
+            elif game_status in (
+                "STATUS_IN_PROGRESS",
+                "IN_PROGRESS",
+                "LIVE",
+            ):
+
+                status = "LIVE"
+
+            elif game_status in (
+                "STATUS_FINAL",
+                "FINAL",
+                "COMPLETED",
+            ):
+
+                status = "LOCKED"
+
+            else:
+
+                status = "LIVE"
+
+        else:
+
+            points = score["projected"]
+
+            status = "PROJECTED"
 
         output.append({
 
@@ -768,13 +1525,22 @@ def build_sleeper_players(
                 team,
 
             "opponent":
-                "",
+                game_info["opponent"],
 
             "game_time":
-                "",
+                game_info["game_time"],
+
+            "game_status":
+                game_info["game_status"],
 
             "points":
-                None,
+                points,
+
+            "projected":
+                score["projected"],
+
+            "actual":
+                score["actual"],
 
             "injury":
                 player.get(
@@ -782,7 +1548,7 @@ def build_sleeper_players(
                 ) or "",
 
             "status":
-                "PROJECTED",
+                status,
 
             "pro_team_id":
                 team,
@@ -791,11 +1557,97 @@ def build_sleeper_players(
     return output
 
 
-def build_sleeper_matchup():
+def get_player_game_info_generic(
+    team_abbreviation,
+    game_lookup,
+):
+
+    if not team_abbreviation:
+
+        return {
+            "team": "",
+            "opponent": "",
+            "game_time": "",
+            "game_status": "",
+        }
+
+    game = game_lookup.get(
+        str(team_abbreviation).upper()
+    )
+
+    if not game:
+
+        return {
+            "team":
+                str(team_abbreviation),
+            "opponent":
+                "",
+            "game_time":
+                "",
+            "game_status":
+                "",
+        }
+
+    return {
+        "team":
+            game["team"],
+        "opponent":
+            game["opponent"],
+        "game_time":
+            game["game_time"],
+        "game_status":
+            game["game_status"],
+    }
+
+
+def get_sleeper_team_actual_total(
+    matchup
+):
+
+    return float(
+        matchup.get(
+            "points"
+        ) or 0
+    )
+
+
+def calculate_team_total_from_players(
+    players,
+    use_actual=False,
+):
+
+    total = 0.0
+
+    for player in players:
+
+        value = (
+            player.get("actual")
+            if use_actual
+            else player.get("projected")
+        )
+
+        if value is not None:
+
+            total += float(value)
+
+    return round(
+        total,
+        2
+    )
+
+
+# ============================================================
+# SLEEPER MATCHUP
+# ============================================================
+
+def build_sleeper_matchup(
+    game_lookup,
+):
 
     user = get_sleeper_user()
 
     if not user:
+
         raise RuntimeError(
             f"Sleeper user '{SLEEPER_USERNAME}' was not found."
         )
@@ -816,12 +1668,29 @@ def build_sleeper_matchup():
         "league_id"
     ]
 
+    # Retrieve the league again so scoring_settings is always
+    # taken from the current league object.
+    league_data = get_sleeper_league(
+        league_id
+    )
+
+    scoring = (
+        league_data.get(
+            "scoring_settings"
+        )
+        or
+        league.get(
+            "scoring_settings"
+        )
+        or {}
+    )
+
     state = get_sleeper_state()
 
-    week = state.get(
-        "display_week"
-    ) or state.get(
-        "week"
+    week = (
+        state.get("display_week")
+        or
+        state.get("week")
     )
 
     rosters = get_sleeper_rosters(
@@ -894,13 +1763,15 @@ def build_sleeper_matchup():
             opponent_matchup = matchup
             break
 
-    # Some league formats may have no opponent yet.
     if not opponent_matchup:
 
         opponent_matchup = {
-            "roster_id": None,
-            "starters": [],
-            "points": 0,
+            "roster_id":
+                None,
+            "starters":
+                [],
+            "points":
+                0,
         }
 
     roster_by_id = {
@@ -911,14 +1782,61 @@ def build_sleeper_matchup():
 
     players = get_sleeper_players()
 
+    # --------------------------------------------------------
+    # Get the current week's Sleeper projection and actual
+    # stat data.
+    # --------------------------------------------------------
+
+    projection_response = (
+        sleeper_projection_get(
+            SEASON,
+            week,
+        )
+    )
+
+    stats_response = (
+        sleeper_stats_get(
+            SEASON,
+            week,
+        )
+    )
+
+    # Depending on the endpoint version, these are normally
+    # dictionaries keyed by player ID.
+    projection_data = (
+        projection_response
+        if isinstance(
+            projection_response,
+            dict
+        )
+        else {}
+    )
+
+    actual_data = (
+        stats_response
+        if isinstance(
+            stats_response,
+            dict
+        )
+        else {}
+    )
+
     my_players = build_sleeper_players(
         my_matchup,
         players,
+        projection_data,
+        actual_data,
+        scoring,
+        game_lookup,
     )
 
     opponent_players = build_sleeper_players(
         opponent_matchup,
         players,
+        projection_data,
+        actual_data,
+        scoring,
+        game_lookup,
     )
 
     my_roster_name = get_sleeper_team_label(
@@ -933,12 +1851,95 @@ def build_sleeper_matchup():
     )
 
     if opponent_roster:
+
         opponent_name = get_sleeper_team_label(
             opponent_roster,
             users,
         )
+
     else:
+
         opponent_name = "Opponent"
+
+    # --------------------------------------------------------
+    # Team totals.
+    #
+    # Actual = real points accumulated so far.
+    # Projected = current actual + projected points from
+    # players whose games have not finished.
+    # --------------------------------------------------------
+
+    my_actual_total = calculate_team_total_from_players(
+        my_players,
+        use_actual=True,
+    )
+
+    opponent_actual_total = calculate_team_total_from_players(
+        opponent_players,
+        use_actual=True,
+    )
+
+    def projected_team_total(
+        players_list
+    ):
+
+        total = 0.0
+
+        for player in players_list:
+
+            actual = player.get(
+                "actual"
+            )
+
+            projected = player.get(
+                "projected"
+            )
+
+            game_status = (
+                player.get(
+                    "game_status"
+                )
+                or ""
+            ).upper()
+
+            if actual is not None:
+
+                total += float(
+                    actual
+                )
+
+            elif projected is not None:
+
+                total += float(
+                    projected
+                )
+
+        return round(
+            total,
+            2
+        )
+
+    my_projected_total = projected_team_total(
+        my_players
+    )
+
+    opponent_projected_total = projected_team_total(
+        opponent_players
+    )
+
+    # Sleeper's own matchup total is retained as a reference
+    # for actual points when available.
+    sleeper_actual_matchup_total = (
+        get_sleeper_team_actual_total(
+            my_matchup
+        )
+    )
+
+    sleeper_opponent_actual_matchup_total = (
+        get_sleeper_team_actual_total(
+            opponent_matchup
+        )
+    )
 
     return {
 
@@ -946,9 +1947,12 @@ def build_sleeper_matchup():
             "Sleeper",
 
         "league_name":
-            league.get(
+            league_data.get(
                 "name",
-                "Sleeper",
+                league.get(
+                    "name",
+                    "Sleeper",
+                ),
             ),
 
         "week":
@@ -957,8 +1961,14 @@ def build_sleeper_matchup():
         "user":
             user.get(
                 "display_name"
-                or "username"
+            )
+            or
+            user.get(
+                "username"
             ),
+
+        "scoring_settings":
+            scoring,
 
         "my_team": {
 
@@ -978,11 +1988,13 @@ def build_sleeper_matchup():
                 "sleeper",
 
             "total":
-                float(
-                    my_matchup.get(
-                        "points"
-                    ) or 0
-                ),
+                sleeper_actual_matchup_total,
+
+            "actual_total":
+                my_actual_total,
+
+            "projected_total":
+                my_projected_total,
 
             "players":
                 my_players,
@@ -1008,11 +2020,13 @@ def build_sleeper_matchup():
                 "sleeper",
 
             "total":
-                float(
-                    opponent_matchup.get(
-                        "points"
-                    ) or 0
-                ),
+                sleeper_opponent_actual_matchup_total,
+
+            "actual_total":
+                opponent_actual_total,
+
+            "projected_total":
+                opponent_projected_total,
 
             "players":
                 opponent_players,
@@ -1369,6 +2383,12 @@ def build_slate_data(games):
                         format_game_time(
                             game["kickoff"]
                         ),
+
+                    "game_status":
+                        game["status"],
+
+                    "status_detail":
+                        game["status_detail"],
                 }
 
                 for game in slate["games"]
@@ -1392,6 +2412,7 @@ def get_next_slate_index(slates):
         )
 
         if kickoff > now:
+
             return slate["id"]
 
     return None
@@ -1486,6 +2507,7 @@ def find_matchup(data, my_team):
     for team in data["teams"]:
 
         if team["id"] == opponent_id:
+
             return team
 
     raise RuntimeError(
@@ -1795,7 +2817,7 @@ def build_game_lookup(nfl_games):
             )
         )
 
-        lookup[home_id] = {
+        home_data = {
             "team":
                 game["home"]["abbreviation"],
             "opponent":
@@ -1816,7 +2838,7 @@ def build_game_lookup(nfl_games):
                 game["status_detail"],
         }
 
-        lookup[away_id] = {
+        away_data = {
             "team":
                 game["away"]["abbreviation"],
             "opponent":
@@ -1836,6 +2858,18 @@ def build_game_lookup(nfl_games):
             "status_detail":
                 game["status_detail"],
         }
+
+        lookup[home_id] = home_data
+        lookup[away_id] = away_data
+
+        # Sleeper uses abbreviations.
+        lookup[
+            game["home"]["abbreviation"]
+        ] = home_data
+
+        lookup[
+            game["away"]["abbreviation"]
+        ] = away_data
 
     return lookup
 
@@ -1896,7 +2930,8 @@ def build_team_data(
 
     output_players = []
 
-    total = 0.0
+    actual_total = 0.0
+    projected_total = 0.0
 
     for player in starters:
 
@@ -1907,8 +2942,17 @@ def build_team_data(
 
         points = score["points"]
 
-        if points is not None:
-            total += points
+        if score["actual"] is not None:
+
+            actual_total += score["actual"]
+
+        elif points is not None:
+
+            projected_total += points
+
+        if score["actual"] is not None:
+
+            projected_total += score["actual"]
 
         injury = (
             player["injury_status"]
@@ -1980,7 +3024,13 @@ def build_team_data(
             output_players,
 
         "total":
-            total,
+            actual_total,
+
+        "actual_total":
+            actual_total,
+
+        "projected_total":
+            projected_total,
     }
 
 
@@ -2036,8 +3086,8 @@ def build_espn_matchup(
             opponent_data,
 
         "difference":
-            my_data["total"]
-            - opponent_data["total"],
+            my_data["actual_total"]
+            - opponent_data["actual_total"],
     }
 
 
@@ -2062,22 +3112,41 @@ def api_dashboard():
             )
         )
 
+        # Build one lookup for both ESPN and Sleeper.
+        game_lookup = build_game_lookup(
+            nfl_games
+        )
+
         sleeper_error = None
         espn_error = None
 
         try:
-            sleeper = build_sleeper_matchup()
+
+            sleeper = build_sleeper_matchup(
+                game_lookup
+            )
+
         except Exception as error:
+
             sleeper = None
-            sleeper_error = str(error)
+
+            sleeper_error = str(
+                error
+            )
 
         try:
+
             espn = build_espn_matchup(
                 nfl_games
             )
+
         except Exception as error:
+
             espn = None
-            espn_error = str(error)
+
+            espn_error = str(
+                error
+            )
 
         yahoo_connected = bool(
             get_yahoo_access_token()
@@ -2301,6 +3370,18 @@ body {
     font-weight: 500;
 }
 
+.completed-option label {
+
+    border-color: #555;
+}
+
+.completed-option input:checked + label {
+
+    background: #332b2b;
+
+    border-color: #b66;
+}
+
 
 /* ============================================================
    REFRESH
@@ -2369,6 +3450,42 @@ body {
     margin: -6px 4px 10px;
 }
 
+.league-banner {
+
+    border-radius: 14px;
+
+    padding: 10px 14px;
+
+    margin-bottom: 10px;
+
+    font-size: 12px;
+
+    font-weight: 900;
+
+    letter-spacing: 1px;
+}
+
+.banner-espn {
+
+    background: #5b1111;
+
+    border-left: 5px solid #d42b2b;
+}
+
+.banner-sleeper {
+
+    background: #111d35;
+
+    border-left: 5px solid #253d70;
+}
+
+.banner-yahoo {
+
+    background: #321342;
+
+    border-left: 5px solid #7c27a1;
+}
+
 
 /* ============================================================
    SCORE
@@ -2413,6 +3530,17 @@ body {
     font-weight: 800;
 
     margin-top: 5px;
+}
+
+.score-secondary {
+
+    color: #777;
+
+    font-size: 11px;
+
+    font-weight: 700;
+
+    margin-top: 3px;
 }
 
 .vs {
@@ -2472,9 +3600,20 @@ body {
 
 .team-total {
 
+    text-align: right;
+
     font-size: 18px;
 
     font-weight: 800;
+}
+
+.team-total-secondary {
+
+    color: #777;
+
+    font-size: 9px;
+
+    margin-top: 2px;
 }
 
 
@@ -2553,6 +3692,11 @@ body {
     color: #7fdc9a;
 }
 
+.live {
+
+    color: #62a9ff;
+}
+
 .projected {
 
     color: #888;
@@ -2586,6 +3730,30 @@ body {
     color: #777;
 
     font-size: 8px;
+}
+
+.actual-points {
+
+    color: #ff5b5b;
+}
+
+.live-actual {
+
+    color: #4f9cff;
+}
+
+.projected-points {
+
+    color: #999;
+}
+
+.points-secondary {
+
+    margin-top: 2px;
+
+    font-size: 10px;
+
+    font-weight: 700;
 }
 
 
@@ -2703,6 +3871,8 @@ let dashboardData = null;
 
 let selectedSlates = new Set();
 
+let showCompleted = false;
+
 
 async function loadDashboard() {
 
@@ -2786,6 +3956,15 @@ function toggleSlate(
 
         selectedSlates.add(slateId);
     }
+
+    renderDashboard();
+}
+
+
+function toggleCompleted() {
+
+    showCompleted =
+        !showCompleted;
 
     renderDashboard();
 }
@@ -2909,6 +4088,11 @@ function renderSlateSelector() {
             })
             .join("");
 
+    const completedChecked =
+        showCompleted
+        ? "checked"
+        : "";
+
     return `
 
         <div class="slate-card">
@@ -2918,7 +4102,43 @@ function renderSlateSelector() {
             </div>
 
             <div class="slate-options">
+
                 ${options}
+
+                <div
+                    class="
+                        slate-option
+                        completed-option
+                    "
+                >
+
+                    <input
+                        type="checkbox"
+                        id="games-completed"
+                        ${completedChecked}
+                        onchange="
+                            toggleCompleted()
+                        "
+                    >
+
+                    <label
+                        for="games-completed"
+                    >
+
+                        <div>
+                            Games Completed
+                        </div>
+
+                        <div
+                            class="slate-games"
+                        >
+                            All finished games
+                        </div>
+
+                    </label>
+
+                </div>
+
             </div>
 
         </div>
@@ -2931,13 +4151,67 @@ function renderSlateSelector() {
    SLATE FILTER
    ============================================================ */
 
+function gameHasFinished(
+    game
+) {
+
+    const status =
+        (
+            game.game_status
+            ||
+            ""
+        ).toUpperCase();
+
+    return (
+        status.includes("FINAL")
+        ||
+        status.includes("COMPLETED")
+        ||
+        status === "STATUS_FINAL"
+    );
+}
+
+
+function playerGameHasFinished(
+    player
+) {
+
+    const status =
+        (
+            player.game_status
+            ||
+            ""
+        ).toUpperCase();
+
+    return (
+        status.includes("FINAL")
+        ||
+        status.includes("COMPLETED")
+        ||
+        status === "STATUS_FINAL"
+    );
+}
+
+
 function playerBelongsToSelectedSlate(
     player
 ) {
 
     if (
+        showCompleted
+        &&
+        playerGameHasFinished(
+            player
+        )
+    ) {
+
+        return true;
+    }
+
+    if (
         selectedSlates.size === 0
     ) {
+
         return false;
     }
 
@@ -2948,7 +4222,7 @@ function playerBelongsToSelectedSlate(
     const team =
         String(
             player.pro_team_id
-        );
+        ).toUpperCase();
 
     for (
         const slateId
@@ -2970,13 +4244,6 @@ function playerBelongsToSelectedSlate(
             of slate.games
         ) {
 
-            /*
-             * ESPN uses numeric NFL team IDs.
-             * Sleeper uses abbreviations.
-             *
-             * We therefore check both forms.
-             */
-
             if (
                 String(game.home_id)
                     === team
@@ -2984,10 +4251,12 @@ function playerBelongsToSelectedSlate(
                 String(game.away_id)
                     === team
                 ||
-                game.home
+                String(game.home)
+                    .toUpperCase()
                     === team
                 ||
-                game.away
+                String(game.away)
+                    .toUpperCase()
                     === team
             ) {
 
@@ -2997,14 +4266,6 @@ function playerBelongsToSelectedSlate(
     }
 
     return false;
-}
-
-
-function getSleeperPlayerTeam(
-    player
-) {
-
-    return player.nfl_team || "";
 }
 
 
@@ -3023,7 +4284,10 @@ function renderSleeper() {
 
             <div class="league-section">
 
-                <div class="league-title">
+                <div class="
+                    league-banner
+                    banner-sleeper
+                ">
                     SLEEPER
                 </div>
 
@@ -3060,7 +4324,10 @@ function renderYahoo() {
 
         <div class="league-section">
 
-            <div class="league-title">
+            <div class="
+                league-banner
+                banner-yahoo
+            ">
                 YAHOO
             </div>
 
@@ -3120,7 +4387,10 @@ function renderESPN() {
 
             <div class="league-section">
 
-                <div class="league-title">
+                <div class="
+                    league-banner
+                    banner-espn
+                ">
                     ESPN
                 </div>
 
@@ -3163,11 +4433,19 @@ function renderLeagueSection(
     const opponent =
         league.opponent;
 
+    const bannerClass =
+        platform === "ESPN"
+        ? "banner-espn"
+        : "banner-sleeper";
+
     return `
 
         <div class="league-section">
 
-            <div class="league-title">
+            <div class="
+                league-banner
+                ${bannerClass}
+            ">
                 ${escapeHtml(title)}
             </div>
 
@@ -3176,11 +4454,7 @@ function renderLeagueSection(
                 ${escapeHtml(
                     league.league_name
                     ||
-                    (
-                        platform === "ESPN"
-                        ? `Week ${league.week}`
-                        : `Week ${league.week}`
-                    )
+                    `Week ${league.week}`
                 )}
 
             </div>
@@ -3202,7 +4476,34 @@ function renderLeagueSection(
                         <div class="score">
 
                             ${Number(
-                                my.total || 0
+                                my.actual_total
+                                ??
+                                my.total
+                                ??
+                                0
+                            ).toFixed(2)}
+
+                        </div>
+
+                        <div class="
+                            score-secondary
+                        ">
+
+                            Actual
+
+                        </div>
+
+                        <div class="
+                            score-secondary
+                        ">
+
+                            Projected:
+                            ${Number(
+                                my.projected_total
+                                ??
+                                my.total
+                                ??
+                                0
                             ).toFixed(2)}
 
                         </div>
@@ -3226,7 +4527,34 @@ function renderLeagueSection(
                         <div class="score">
 
                             ${Number(
-                                opponent.total || 0
+                                opponent.actual_total
+                                ??
+                                opponent.total
+                                ??
+                                0
+                            ).toFixed(2)}
+
+                        </div>
+
+                        <div class="
+                            score-secondary
+                        ">
+
+                            Actual
+
+                        </div>
+
+                        <div class="
+                            score-secondary
+                        ">
+
+                            Projected:
+                            ${Number(
+                                opponent.projected_total
+                                ??
+                                opponent.total
+                                ??
+                                0
                             ).toFixed(2)}
 
                         </div>
@@ -3282,11 +4610,34 @@ function renderTeam(
 
                 </div>
 
-                <div class="team-total">
+                <div>
 
-                    ${Number(
-                        team.total || 0
-                    ).toFixed(2)}
+                    <div class="team-total">
+
+                        ${Number(
+                            team.actual_total
+                            ??
+                            team.total
+                            ??
+                            0
+                        ).toFixed(2)}
+
+                    </div>
+
+                    <div class="
+                        team-total-secondary
+                    ">
+
+                        Actual · Proj
+                        ${Number(
+                            team.projected_total
+                            ??
+                            team.total
+                            ??
+                            0
+                        ).toFixed(2)}
+
+                    </div>
 
                 </div>
 
@@ -3328,33 +4679,121 @@ function renderPlayer(
     player
 ) {
 
-    const points =
-        player.points === null
-        ||
-        player.points === undefined
+    const projected =
+        player.projected !== null
+        &&
+        player.projected !== undefined
         ?
-
-        "--"
-
-        :
 
         Number(
-            player.points
-        ).toFixed(2);
+            player.projected
+        ).toFixed(2)
 
-    const statusClass =
-        player.status === "LOCKED"
-        ?
-        "locked"
         :
-        "projected";
 
-    const statusText =
-        player.status === "LOCKED"
+        "--";
+
+    const actual =
+        player.actual !== null
+        &&
+        player.actual !== undefined
         ?
-        "✓ LOCKED"
+
+        Number(
+            player.actual
+        ).toFixed(2)
+
         :
-        "PROJECTED";
+
+        "--";
+
+    const status =
+        (
+            player.status
+            ||
+            ""
+        ).toUpperCase();
+
+    const finished =
+        playerGameHasFinished(
+            player
+        );
+
+    const live =
+        status === "LIVE"
+        ||
+        (
+            !finished
+            &&
+            player.actual !== null
+            &&
+            player.actual !== undefined
+        );
+
+    let pointsHtml = "";
+
+    if (finished) {
+
+        pointsHtml = `
+
+            <div class="points">
+
+                <span class="
+                    actual-points
+                ">
+                    ${actual}
+                </span>
+
+                <div class="points-label">
+                    ACTUAL
+                </div>
+
+            </div>
+
+        `;
+
+    } else if (live) {
+
+        pointsHtml = `
+
+            <div class="points">
+
+                <span class="
+                    live-actual
+                ">
+                    ${actual}
+                </span>
+
+                <div class="points-secondary
+                    projected-points
+                ">
+                    ${projected} PROJ
+                </div>
+
+            </div>
+
+        `;
+
+    } else {
+
+        pointsHtml = `
+
+            <div class="points">
+
+                <span class="
+                    projected-points
+                ">
+                    ${projected}
+                </span>
+
+                <div class="points-label">
+                    PROJ
+                </div>
+
+            </div>
+
+        `;
+    }
 
     let injuryHtml = "";
 
@@ -3447,6 +4886,29 @@ function renderPlayer(
         `;
     }
 
+    let statusClass =
+        "projected";
+
+    let statusText =
+        "PROJECTED";
+
+    if (finished) {
+
+        statusClass =
+            "locked";
+
+        statusText =
+            "✓ FINAL";
+
+    } else if (live) {
+
+        statusClass =
+            "live";
+
+        statusText =
+            "● LIVE";
+    }
+
     return `
 
         <div class="player">
@@ -3490,15 +4952,7 @@ function renderPlayer(
 
             </div>
 
-            <div class="points">
-
-                ${points}
-
-                <div class="points-label">
-                    PTS
-                </div>
-
-            </div>
+            ${pointsHtml}
 
         </div>
 
