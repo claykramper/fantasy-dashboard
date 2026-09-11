@@ -34,10 +34,10 @@ def format_game_time(kickoff):
     return local.strftime("%I:%M %p").lstrip("0")
 
 
-def monday_start_for(date_value):
-    """Return the Monday 12:00 AM Central that owns this date."""
-    days_since_monday = date_value.weekday()
-    return date_value - timedelta(days=days_since_monday)
+def tuesday_start_for(date_value):
+    """Return the Tuesday 12:00 AM Central that owns this date."""
+    days_since_tuesday = (date_value.weekday() - 1) % 7
+    return date_value - timedelta(days=days_since_tuesday)
 
 
 def _is_final(game):
@@ -54,15 +54,12 @@ def _is_final(game):
 
 def current_fantasy_week_window(now=None, games=None):
     """
-    Fantasy weeks run Monday morning -> Monday night.
+    Fantasy weeks run Tuesday 12:00 AM -> next Tuesday 12:00 AM.
 
-    We intentionally do NOT advance to the next week merely because
-    the clock reaches Monday. The current fantasy week remains active
-    until every NFL game scheduled for Monday is final.
-
-    Once Monday's games are finished, the next Monday becomes the
-    current week immediately. In normal NFL scheduling this means the
-    rollover happens immediately after Monday Night Football ends.
+    Monday is therefore the final day of the fantasy week. We do NOT
+    roll over merely because the clock reaches Tuesday: if a Monday
+    night game is still live, the old fantasy week remains active.
+    The rollover happens as soon as all Monday games are final.
 
     Returns:
         week_start_datetime,
@@ -72,55 +69,45 @@ def current_fantasy_week_window(now=None, games=None):
     now = now or datetime.now(LOCAL_TIMEZONE)
     local_now = now.astimezone(LOCAL_TIMEZONE)
 
-    today = local_now.date()
-    week_start_date = monday_start_for(today)
-    week_start = datetime.combine(
-        week_start_date,
+    candidate_date = tuesday_start_for(local_now.date())
+    candidate_start = datetime.combine(
+        candidate_date,
         dt_time.min,
         tzinfo=LOCAL_TIMEZONE,
     )
-    next_week_start = week_start + timedelta(days=7)
+    candidate_end = candidate_start + timedelta(days=7)
 
-    # Before Monday at 12:00 AM -> straightforward current week.
-    if local_now < next_week_start:
-        return (
-            week_start,
-            next_week_start,
-            week_start.strftime("%Y-%m-%d"),
-        )
+    # The Monday immediately before the candidate Tuesday is the
+    # final day of the previous fantasy week. If its games are still
+    # active, retain the previous week even though it is technically
+    # Tuesday after midnight.
+    monday_date = candidate_date - timedelta(days=1)
 
-    # At/after Monday midnight, determine whether Monday's games are
-    # finished. If they are not, keep the previous fantasy week alive.
     monday_games = []
-
     if games:
         for game in games:
             kickoff = game.get("kickoff")
             if not kickoff:
                 continue
 
-            local_kickoff = kickoff.astimezone(
-                LOCAL_TIMEZONE
-            )
+            local_kickoff = kickoff.astimezone(LOCAL_TIMEZONE)
 
-            if local_kickoff.date() == today:
+            if local_kickoff.date() == monday_date:
                 monday_games.append(game)
 
     if monday_games and not all(_is_final(game) for game in monday_games):
+        previous_start = candidate_start - timedelta(days=7)
+        previous_end = candidate_start
         return (
-            week_start,
-            next_week_start,
-            week_start.strftime("%Y-%m-%d"),
+            previous_start,
+            previous_end,
+            previous_start.strftime("%Y-%m-%d"),
         )
 
-    # No Monday games or all Monday games are final: roll forward.
-    rolled_start = next_week_start
-    rolled_end = rolled_start + timedelta(days=7)
-
     return (
-        rolled_start,
-        rolled_end,
-        rolled_start.strftime("%Y-%m-%d"),
+        candidate_start,
+        candidate_end,
+        candidate_start.strftime("%Y-%m-%d"),
     )
 
 
@@ -158,7 +145,7 @@ def get_nfl_schedule():
     schedule for the current fantasy week.
 
     The returned list is then filtered to ONLY the active
-    Monday-to-Monday fantasy week.
+    Tuesday-to-Tuesday fantasy week.
     """
     games = []
 
