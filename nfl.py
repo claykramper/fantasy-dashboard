@@ -7,41 +7,59 @@ from config import ESPN_SCOREBOARD_URL, LOCAL_TIMEZONE
 
 def get_nfl_schedule():
     """
-    Return games belonging to the current fantasy/NFL week.
+    Return all NFL games belonging to the current dashboard/fantasy week.
 
-    NFL fantasy weeks run from Thursday through Monday.
-    On Tuesday/Wednesday, we move forward to the upcoming Thursday.
+    The dashboard week runs Tuesday through Monday.
+
+    This intentionally uses a Tuesday-to-Monday window rather than assuming
+    NFL games only occur Thursday through Monday. That allows the dashboard
+    to automatically handle:
+      - Wednesday games
+      - Thursday/Thanksgiving games
+      - Friday/Black Friday games
+      - Saturday games
+      - Sunday games
+      - multiple Monday games
+      - other unusual/special NFL scheduling
+
+    On Tuesday, the previous Monday is considered complete and the dashboard
+    rolls forward to the new Tuesday-to-Monday window.
     """
 
     now = datetime.now(LOCAL_TIMEZONE)
     today = now.date()
 
-    # Thursday = 3
-    # Friday = 4
-    # Saturday = 5
-    # Sunday = 6
-    # Monday = 0
-    # Tuesday = 1
+    # Python weekday:
+    # Monday    = 0
+    # Tuesday   = 1
     # Wednesday = 2
+    # Thursday  = 3
+    # Friday    = 4
+    # Saturday  = 5
+    # Sunday    = 6
 
     weekday = today.weekday()
 
-    if weekday in (3, 4, 5, 6, 0):
-        # Thursday through Monday:
-        # use the most recent Thursday.
-        days_since_thursday = (weekday - 3) % 7
-        week_start = today - timedelta(days=days_since_thursday)
-    else:
-        # Tuesday/Wednesday:
-        # use the upcoming Thursday.
-        days_until_thursday = (3 - weekday) % 7
-        week_start = today + timedelta(days=days_until_thursday)
+    # Tuesday is the beginning of our dashboard/fantasy-week window.
+    #
+    # On:
+    #   Tuesday    -> today
+    #   Wednesday  -> yesterday
+    #   Thursday   -> 2 days ago
+    #   ...
+    #   Monday     -> 6 days ago
+    #
+    # Therefore every day from Tuesday through Monday belongs to the same
+    # dashboard week.
+    days_since_tuesday = (weekday - 1) % 7
+    week_start = today - timedelta(days=days_since_tuesday)
 
-    week_end = week_start + timedelta(days=4)
+    # Tuesday through Monday is seven calendar days.
+    week_end = week_start + timedelta(days=6)
 
     games = []
 
-    for offset in range(5):
+    for offset in range(7):
         day = week_start + timedelta(days=offset)
 
         try:
@@ -69,16 +87,18 @@ def get_nfl_schedule():
 
             home = next(
                 (
-                    c for c in competitors
-                    if c.get('homeAway') == 'home'
+                    competitor
+                    for competitor in competitors
+                    if competitor.get('homeAway') == 'home'
                 ),
                 competitors[0],
             )
 
             away = next(
                 (
-                    c for c in competitors
-                    if c.get('homeAway') == 'away'
+                    competitor
+                    for competitor in competitors
+                    if competitor.get('homeAway') == 'away'
                 ),
                 competitors[1],
             )
@@ -122,14 +142,15 @@ def get_nfl_schedule():
                 ),
             })
 
-    # Remove accidental duplicates.
+    # ESPN can theoretically return duplicate events when querying dates
+    # individually, so deduplicate by event ID.
     unique = {}
 
     for game in games:
         unique[game['id']] = game
 
     games = list(unique.values())
-    games.sort(key=lambda g: g['kickoff'])
+    games.sort(key=lambda game: game['kickoff'])
 
     return games
 
@@ -141,7 +162,7 @@ def group_games_into_slates(games):
     slates = []
     current = None
 
-    for game in sorted(games, key=lambda g: g['kickoff']):
+    for game in sorted(games, key=lambda game: game['kickoff']):
         if (
             current is None
             or (
