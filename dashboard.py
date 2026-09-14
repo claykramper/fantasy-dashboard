@@ -10,47 +10,56 @@ from yahoo_sync_store import refresh_yahoo
 
 
 def yahoo_player(player, lookup):
-    team = str(player.get('team') or '').upper()
-    game = lookup.get(team, {})
+    team = player.get('team') or ''
+    game = lookup.get(str(team).upper(), {})
+
+    slot = (
+        player.get('slot')
+        or player.get('roster_slot')
+        or player.get('position')
+        or ''
+    )
+
+    slot_upper = str(slot).upper()
+
+    is_bench = slot_upper in (
+        'BN',
+        'BENCH',
+        'IR',
+        'IL',
+    )
 
     return {
         'name': player.get('name'),
-        'slot': (
-            player.get('slot')
-            or player.get('position')
-            or ''
-        ),
+        'slot': slot,
         'actual': player.get('points'),
         'projected': player.get('projected_points'),
         'injury': player.get('injury_status'),
         'game_status': game.get(
             'game_status',
-            player.get('game_status', ''),
+            player.get('game_status'),
         ),
-        'status_detail': game.get('status_detail', ''),
         'status': player.get('status'),
         'nfl_team': game.get(
             'team',
-            player.get('team', ''),
+            player.get('team'),
         ),
         'opponent': game.get(
             'opponent',
-            player.get('opponent', ''),
+            player.get('opponent'),
         ),
         'game_time': game.get(
             'game_time',
-            player.get('game_time', ''),
+            player.get('game_time'),
         ),
+        'status_detail': game.get('status_detail', ''),
         'pro_team_id': game.get('team_id'),
+        'starter': not is_bench,
+        'bench': is_bench,
     }
 
 
 def yahoo_team(abbrev, team_name, players, lookup):
-    normalized_players = [
-        yahoo_player(player, lookup)
-        for player in players
-    ]
-
     return {
         'abbrev': abbrev,
         'team_name': team_name,
@@ -59,7 +68,10 @@ def yahoo_team(abbrev, team_name, players, lookup):
             for p in players
         ),
         'projected_total': None,
-        'players': normalized_players,
+        'players': [
+            yahoo_player(player, lookup)
+            for player in players
+        ],
     }
 
 

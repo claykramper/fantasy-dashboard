@@ -1,30 +1,37 @@
 let dashboardData = null;
 let selectedSlates = new Set();
 let showCompleted = false;
+let showBench = false;
 
 
 async function loadDashboard() {
     try {
-        const r = await fetch(
+        const response = await fetch(
             '/api/dashboard',
             {cache: 'no-store'}
         );
 
-        const d = await r.json();
+        const data = await response.json();
 
-        if (!r.ok) {
+        if (!response.ok) {
             throw new Error(
-                d.error || 'Dashboard error'
+                data.error || 'Dashboard error'
             );
         }
 
-        dashboardData = d;
+        dashboardData = data;
+
         initializeSelectedSlates();
         renderDashboard();
 
-    } catch (e) {
-        document.getElementById('content').innerHTML =
-            `<div class="error">${escapeHtml(e.message)}</div>`;
+    } catch (error) {
+        document.getElementById(
+            'content'
+        ).innerHTML = (
+            `<div class="error">${
+                escapeHtml(error.message)
+            }</div>`
+        );
     }
 }
 
@@ -58,46 +65,81 @@ function toggleCompleted() {
 }
 
 
+function toggleBench() {
+    showBench = !showBench;
+    renderDashboard();
+}
+
+
 function renderDashboard() {
-    document.getElementById('content').innerHTML =
-        `${renderSlateSelector()}
+    document.getElementById(
+        'content'
+    ).innerHTML = `
+        ${renderSlateSelector()}
+
         <div class="refresh-row">
-            <div class="updated">Live dashboard</div>
-            <button class="refresh" onclick="refreshDashboard()">
+            <div class="updated">
+                Live dashboard
+            </div>
+
+            <button
+                class="refresh"
+                onclick="refreshDashboard()"
+            >
                 ↻ Refresh
             </button>
         </div>
+
         ${renderSleeper()}
         ${renderYahoo()}
-        ${renderESPN()}`;
+        ${renderESPN()}
+    `;
 }
 
 
 function renderSlateSelector() {
-    if (!dashboardData.slates?.length) {
+    if (
+        !dashboardData.slates?.length
+    ) {
         return '';
     }
 
     const options = dashboardData.slates
         .map(
-            s =>
-                `<div class="slate-option">
+            slate => `
+                <div class="slate-option">
                     <input
                         type="checkbox"
-                        id="slate-${s.id}"
-                        ${selectedSlates.has(s.id) ? 'checked' : ''}
-                        onchange="toggleSlate(${s.id})"
+                        id="slate-${slate.id}"
+                        ${
+                            selectedSlates.has(
+                                slate.id
+                            )
+                                ? 'checked'
+                                : ''
+                        }
+                        onchange="toggleSlate(
+                            ${slate.id}
+                        )"
                     >
-                    <label for="slate-${s.id}">
-                        ${escapeHtml(s.label)}
+
+                    <label
+                        for="slate-${slate.id}"
+                    >
+                        ${escapeHtml(
+                            slate.label
+                        )}
                     </label>
-                </div>`
+                </div>
+            `
         )
         .join('');
 
     return `
         <div class="slate-card">
-            <div class="slate-label">NFL SLATES</div>
+            <div class="slate-label">
+                NFL SLATES
+            </div>
 
             <div class="slate-options">
                 ${options}
@@ -106,11 +148,37 @@ function renderSlateSelector() {
                     <input
                         type="checkbox"
                         id="games-completed"
-                        ${showCompleted ? 'checked' : ''}
+                        ${
+                            showCompleted
+                                ? 'checked'
+                                : ''
+                        }
                         onchange="toggleCompleted()"
                     >
-                    <label for="games-completed">
+
+                    <label
+                        for="games-completed"
+                    >
                         Games Completed
+                    </label>
+                </div>
+
+                <div class="slate-option bench-option">
+                    <input
+                        type="checkbox"
+                        id="display-bench"
+                        ${
+                            showBench
+                                ? 'checked'
+                                : ''
+                        }
+                        onchange="toggleBench()"
+                    >
+
+                    <label
+                        for="display-bench"
+                    >
+                        Display Bench
                     </label>
                 </div>
             </div>
@@ -119,13 +187,13 @@ function renderSlateSelector() {
 }
 
 
-function playerGameHasFinished(p) {
+function playerGameHasFinished(player) {
     const status = String(
-        p.game_status || ''
+        player.game_status || ''
     ).toUpperCase();
 
     const detail = String(
-        p.status_detail || ''
+        player.status_detail || ''
     ).toUpperCase();
 
     return (
@@ -137,72 +205,50 @@ function playerGameHasFinished(p) {
 }
 
 
-function playerGameIsLive(p) {
-    const status = String(
-        p.game_status || ''
-    ).toUpperCase();
-
-    const detail = String(
-        p.status_detail || ''
-    ).toUpperCase();
-
-    if (playerGameHasFinished(p)) {
-        return false;
-    }
-
-    return (
-        status.includes('IN_PROGRESS')
-        || status.includes('LIVE')
-        || status.includes('INPROGRESS')
-        || detail.includes('LIVE')
-        || detail.includes('Q1')
-        || detail.includes('Q2')
-        || detail.includes('Q3')
-        || detail.includes('Q4')
-        || detail.includes('HALFTIME')
-        || detail.includes('OT')
-    );
-}
-
-
-function playerBelongsToSelectedSlate(p) {
+function playerBelongsToSelectedSlate(player) {
     if (
         showCompleted
-        && playerGameHasFinished(p)
+        && playerGameHasFinished(player)
     ) {
         return true;
     }
 
     if (
-        !p.pro_team_id
+        !player.pro_team_id
         || selectedSlates.size === 0
     ) {
         return false;
     }
 
     const teamId = String(
-        p.pro_team_id
+        player.pro_team_id
     ).toUpperCase();
 
-    for (const id of selectedSlates) {
-        const slate = dashboardData.slates.find(
-            x => x.id === id
-        );
+    for (
+        const slateId of selectedSlates
+    ) {
+        const slate =
+            dashboardData.slates.find(
+                item => item.id === slateId
+            );
 
         if (!slate) {
             continue;
         }
 
-        for (const g of slate.games) {
+        for (const game of slate.games) {
+            const teams = [
+                game.home_id,
+                game.away_id,
+                game.home,
+                game.away,
+            ];
+
             if (
-                [
-                    g.home_id,
-                    g.away_id,
-                    g.home,
-                    g.away
-                ].some(
+                teams.some(
                     value =>
-                        String(value).toUpperCase()
+                        String(value)
+                            .toUpperCase()
                         === teamId
                 )
             ) {
@@ -224,10 +270,13 @@ function renderSleeper() {
         : `
             <div class="league-section">
                 <div class="error">
-                    ${escapeHtml(
-                        dashboardData.sleeper_error
-                        || 'Sleeper data unavailable.'
-                    )}
+                    ${
+                        escapeHtml(
+                            dashboardData
+                                .sleeper_error
+                            || 'Sleeper data unavailable.'
+                        )
+                    }
                 </div>
             </div>
         `;
@@ -243,10 +292,13 @@ function renderYahoo() {
         : `
             <div class="league-section">
                 <div class="error">
-                    ${escapeHtml(
-                        dashboardData.yahoo_error
-                        || 'Yahoo data unavailable.'
-                    )}
+                    ${
+                        escapeHtml(
+                            dashboardData
+                                .yahoo_error
+                            || 'Yahoo data unavailable.'
+                        )
+                    }
                 </div>
             </div>
         `;
@@ -262,22 +314,29 @@ function renderESPN() {
         : `
             <div class="league-section">
                 <div class="error">
-                    ${escapeHtml(
-                        dashboardData.espn_error
-                        || 'ESPN data unavailable.'
-                    )}
+                    ${
+                        escapeHtml(
+                            dashboardData
+                                .espn_error
+                            || 'ESPN data unavailable.'
+                        )
+                    }
                 </div>
             </div>
         `;
 }
 
 
-function renderLeagueSection(league, platform) {
+function renderLeagueSection(
+    league,
+    platform
+) {
     const my = league.my_team;
-    const opp = league.opponent;
+    const opponent = league.opponent;
 
     return `
         <div class="league-section">
+
             <div class="league-subtitle">
                 ${escapeHtml(
                     league.league_name
@@ -285,11 +344,16 @@ function renderLeagueSection(league, platform) {
                 )}
             </div>
 
-            <div class="score-card ${platform.toLowerCase()}">
+            <div class="score-card ${
+                platform.toLowerCase()
+            }">
                 <div class="matchup">
+
                     <div>
                         <div class="team-abbrev">
-                            ${escapeHtml(my.abbrev)}
+                            ${escapeHtml(
+                                my.abbrev
+                            )}
                         </div>
 
                         <div class="score">
@@ -314,17 +378,21 @@ function renderLeagueSection(league, platform) {
                         </div>
                     </div>
 
-                    <div class="vs">VS</div>
+                    <div class="vs">
+                        VS
+                    </div>
 
                     <div>
                         <div class="team-abbrev">
-                            ${escapeHtml(opp.abbrev)}
+                            ${escapeHtml(
+                                opponent.abbrev
+                            )}
                         </div>
 
                         <div class="score">
                             ${formatNumber(
-                                opp.actual_total
-                                ?? opp.total
+                                opponent.actual_total
+                                ?? opponent.total
                                 ?? 0
                             )}
                         </div>
@@ -336,33 +404,69 @@ function renderLeagueSection(league, platform) {
                         <div class="score-secondary">
                             Projected:
                             ${formatNumber(
-                                opp.projected_total
-                                ?? opp.total
+                                opponent.projected_total
+                                ?? opponent.total
                                 ?? 0
                             )}
                         </div>
                     </div>
+
                 </div>
             </div>
 
             <div class="rosters">
                 ${renderTeam(my)}
-                ${renderTeam(opp)}
+                ${renderTeam(opponent)}
             </div>
+
         </div>
     `;
 }
 
 
 function renderTeam(team) {
-    const players = (team.players || [])
-        .filter(playerBelongsToSelectedSlate);
+    const eligiblePlayers = (
+        team.players || []
+    ).filter(
+        playerBelongsToSelectedSlate
+    );
+
+    const starters = eligiblePlayers.filter(
+        player => player.starter !== false
+    );
+
+    const bench = eligiblePlayers.filter(
+        player => player.bench === true
+    );
+
+    let playerHtml = '';
+
+    if (starters.length) {
+        playerHtml += starters
+            .map(renderPlayer)
+            .join('');
+    } else {
+        playerHtml += `
+            <div class="no-players">
+                No starters in selected slate
+            </div>
+        `;
+    }
+
+    if (showBench) {
+        playerHtml += renderBenchSection(
+            bench
+        );
+    }
 
     return `
         <div class="team-card">
+
             <div class="team-header">
                 <div class="team-name">
-                    ${escapeHtml(team.abbrev)}
+                    ${escapeHtml(
+                        team.abbrev
+                    )}
                 </div>
 
                 <div>
@@ -385,31 +489,74 @@ function renderTeam(team) {
                 </div>
             </div>
 
-            ${
-                players.length
-                    ? players.map(renderPlayer).join('')
-                    : `<div class="no-players">
-                        No starters in selected slate
-                    </div>`
-            }
+            ${playerHtml}
+
         </div>
     `;
 }
 
 
-function renderPlayer(p) {
+function renderBenchSection(bench) {
+    if (!bench.length) {
+        return `
+            <div class="bench-section">
+                <div class="bench-title">
+                    BENCH
+                </div>
+
+                <div class="no-players">
+                    No bench players in selected slate
+                </div>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="bench-section">
+            <div class="bench-title">
+                BENCH
+            </div>
+
+            ${bench
+                .map(renderPlayer)
+                .join('')}
+        </div>
+    `;
+}
+
+
+function renderPlayer(player) {
     const projected =
-        p.projected != null
-            ? Number(p.projected).toFixed(2)
+        player.projected != null
+            ? Number(
+                player.projected
+            ).toFixed(2)
             : '--';
 
     const actual =
-        p.actual != null
-            ? Number(p.actual).toFixed(2)
+        player.actual != null
+            ? Number(
+                player.actual
+            ).toFixed(2)
             : '--';
 
-    const finished = playerGameHasFinished(p);
-    const live = playerGameIsLive(p);
+    const finished =
+        playerGameHasFinished(
+            player
+        );
+
+    const live =
+        !finished
+        && (
+            String(
+                player.status || ''
+            ).toUpperCase()
+            === 'LIVE'
+            || (
+                player.actual != null
+                && player.game_status
+            )
+        );
 
     let points;
 
@@ -454,19 +601,26 @@ function renderPlayer(p) {
     let injury = '';
 
     if (
-        p.injury
-        && p.injury.toUpperCase() !== 'ACTIVE'
+        player.injury
+        && player.injury.toUpperCase()
+            !== 'ACTIVE'
     ) {
-        const injuryClass =
-            ['OUT', 'DOUBTFUL'].includes(
-                p.injury.toUpperCase()
-            )
-                ? 'injury-alert'
-                : '';
+        const injuryClass = [
+            'OUT',
+            'DOUBTFUL',
+        ].includes(
+            player.injury.toUpperCase()
+        )
+            ? 'injury-alert'
+            : '';
 
         injury = `
-            <span class="injury ${injuryClass}">
-                ${escapeHtml(p.injury)}
+            <span class="injury ${
+                injuryClass
+            }">
+                ${escapeHtml(
+                    player.injury
+                )}
             </span>
         `;
     }
@@ -474,35 +628,43 @@ function renderPlayer(p) {
     let game = '';
 
     if (
-        p.nfl_team
-        && p.opponent
-        && p.game_time
+        player.nfl_team
+        && player.opponent
+        && player.game_time
     ) {
         game = `
             <span class="game-info">
-                ${escapeHtml(p.nfl_team)}
+                ${escapeHtml(
+                    player.nfl_team
+                )}
                 vs
-                ${escapeHtml(p.opponent)}
+                ${escapeHtml(
+                    player.opponent
+                )}
                 ·
-                ${escapeHtml(p.game_time)}
+                ${escapeHtml(
+                    player.game_time
+                )}
             </span>
         `;
-    } else if (p.nfl_team) {
+    } else if (player.nfl_team) {
         game = `
             <span class="game-info">
-                ${escapeHtml(p.nfl_team)}
+                ${escapeHtml(
+                    player.nfl_team
+                )}
             </span>
         `;
     }
 
-    const cls =
+    const playerClass =
         finished
             ? 'locked'
             : live
                 ? 'live'
                 : 'projected';
 
-    const status =
+    const statusText =
         finished
             ? '✓ FINAL'
             : live
@@ -511,26 +673,36 @@ function renderPlayer(p) {
 
     return `
         <div class="player">
+
             <div class="position">
-                ${escapeHtml(p.slot)}
+                ${escapeHtml(
+                    player.slot
+                )}
             </div>
 
             <div>
                 <div class="player-name">
-                    ${escapeHtml(p.name)}
+                    ${escapeHtml(
+                        player.name
+                    )}
                 </div>
 
                 <div class="player-meta">
-                    <span class="status ${cls}">
-                        ${status}
+
+                    <span class="status ${
+                        playerClass
+                    }">
+                        ${statusText}
                     </span>
 
                     ${injury}
                     ${game}
+
                 </div>
             </div>
 
             ${points}
+
         </div>
     `;
 }
@@ -541,26 +713,41 @@ function refreshDashboard() {
 }
 
 
-function formatNumber(v) {
-    const n = Number(v);
+function formatNumber(value) {
+    const number = Number(value);
 
-    return Number.isFinite(n)
-        ? n.toFixed(2)
+    return Number.isFinite(number)
+        ? number.toFixed(2)
         : '0.00';
 }
 
 
-function escapeHtml(v) {
-    if (v == null) {
+function escapeHtml(value) {
+    if (value == null) {
         return '';
     }
 
-    return String(v)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
+    return String(value)
+        .replace(
+            /&/g,
+            '&amp;'
+        )
+        .replace(
+            /</g,
+            '&lt;'
+        )
+        .replace(
+            />/g,
+            '&gt;'
+        )
+        .replace(
+            /"/g,
+            '&quot;'
+        )
+        .replace(
+            /'/g,
+            '&#039;'
+        );
 }
 
 
