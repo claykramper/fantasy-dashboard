@@ -1,5 +1,6 @@
 import os
 
+import requests
 from flask import Flask, jsonify, render_template, request
 
 from config import SECRET_KEY
@@ -49,8 +50,101 @@ def yahoo_sync():
 
     set_latest_yahoo(data)
 
-    starters = sum(1 for p in roster if isinstance(p, dict) and p.get('status') == 'starter')
-    return jsonify({'ok': True, 'team': data.get('team_name'), 'starters': starters})
+    starters = sum(
+        1
+        for p in roster
+        if isinstance(p, dict) and p.get('status') == 'starter'
+    )
+
+    return jsonify({
+        'ok': True,
+        'team': data.get('team_name'),
+        'starters': starters
+    })
+
+
+@app.route('/api/leaguesync-test')
+def leaguesync_test():
+    """
+    Temporary diagnostic endpoint.
+
+    Tests whether the Render server can use the LeagueSync
+    fh_session cookie to retrieve the user's dashboard.
+    """
+
+    session_cookie = os.getenv('LEAGUESYNC_SESSION_COOKIE')
+
+    if not session_cookie:
+        return jsonify({
+            'ok': False,
+            'error': 'LEAGUESYNC_SESSION_COOKIE is not configured on Render.'
+        }), 500
+
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/152.0.0.0 Safari/537.36'
+        ),
+        'Accept': '*/*',
+        'Referer': 'https://www.leaguesync.app/dashboard/bfe5618b-619a-443b-864c-17fdc8b7cfbb__0',
+    }
+
+    try:
+        response = requests.get(
+            'https://www.leaguesync.app/api/me/dashboard',
+            cookies={'fh_session': session_cookie},
+            headers=headers,
+            timeout=30,
+        )
+
+        if response.status_code != 200:
+            return jsonify({
+                'ok': False,
+                'http_status': response.status_code,
+                'error': 'LeagueSync did not accept the session from Render.'
+            }), 502
+
+        data = response.json()
+
+        if not isinstance(data, list):
+            return jsonify({
+                'ok': False,
+                'http_status': response.status_code,
+                'error': 'LeagueSync returned an unexpected response format.'
+            }), 502
+
+        yahoo_leagues = [
+            league
+            for league in data
+            if isinstance(league, dict)
+            and str(league.get('platform', '')).lower() == 'yahoo'
+        ]
+
+        return jsonify({
+            'ok': True,
+            'http_status': response.status_code,
+            'league_count': len(data),
+            'yahoo_league_count': len(yahoo_leagues),
+            'yahoo_teams': [
+                league.get('team_name')
+                for league in yahoo_leagues
+                if league.get('team_name')
+            ],
+        })
+
+    except requests.RequestException as e:
+        return jsonify({
+            'ok': False,
+            'error': f'Request to LeagueSync failed: {type(e).__name__}'
+        }), 502
+
+    except ValueError:
+        return jsonify({
+            'ok': False,
+            'http_status': response.status_code,
+            'error': 'LeagueSync returned invalid JSON.'
+        }), 502
 
 
 @app.route('/yahoo/login')
@@ -70,15 +164,18 @@ def yahoo_status():
     leagues = None
     games_error = None
     leagues_error = None
+
     if token:
         try:
             games = get_yahoo_games(token)
         except Exception as e:
             games_error = str(e)
+
         try:
             leagues = get_yahoo_leagues(token)
         except Exception as e:
             leagues_error = str(e)
+
     return render_template(
         'yahoo_status.html',
         connected=bool(token),
