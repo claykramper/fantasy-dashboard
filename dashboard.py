@@ -1,7 +1,12 @@
 from espn import build_espn_matchup
-from nfl import build_game_lookup, build_slate_data, get_next_slate_index, get_nfl_schedule
+from nfl import (
+    build_game_lookup,
+    build_slate_data,
+    get_next_slate_index,
+    get_nfl_schedule,
+)
 from sleeper import build_sleeper_matchup
-from yahoo_sync_store import get_latest_yahoo
+from yahoo_sync_store import refresh_yahoo
 
 
 def yahoo_player(player):
@@ -23,7 +28,10 @@ def yahoo_team(abbrev, team_name, players):
     return {
         'abbrev': abbrev,
         'team_name': team_name,
-        'actual_total': sum(float(p.get('points') or 0) for p in players),
+        'actual_total': sum(
+            float(p.get('points') or 0)
+            for p in players
+        ),
         'projected_total': None,
         'players': [yahoo_player(p) for p in players],
     }
@@ -40,8 +48,16 @@ def build_yahoo_matchup(data):
     return {
         'league_name': data.get('league_name'),
         'week': matchup.get('week'),
-        'my_team': yahoo_team(data.get('team_name') or 'Yahoo', data.get('team_name') or 'Yahoo', roster),
-        'opponent': yahoo_team(matchup.get('opponent') or 'Opponent', matchup.get('opponent') or 'Opponent', opponent_roster),
+        'my_team': yahoo_team(
+            data.get('team_name') or 'Yahoo',
+            data.get('team_name') or 'Yahoo',
+            roster,
+        ),
+        'opponent': yahoo_team(
+            matchup.get('opponent') or 'Opponent',
+            matchup.get('opponent') or 'Opponent',
+            opponent_roster,
+        ),
         'actual_total': matchup.get('my_score'),
         'opponent_actual_total': matchup.get('opp_score'),
         'my_score': matchup.get('my_score'),
@@ -57,6 +73,7 @@ def build_dashboard():
 
     sleeper = None
     sleeper_error = None
+
     try:
         sleeper = build_sleeper_matchup(lookup)
     except Exception as e:
@@ -64,14 +81,24 @@ def build_dashboard():
 
     espn = None
     espn_error = None
+
     try:
         espn = build_espn_matchup(nfl_games)
     except Exception as e:
         espn_error = str(e)
 
-    yahoo_data = get_latest_yahoo()
-    yahoo = build_yahoo_matchup(yahoo_data)
-    yahoo_error = None if yahoo else 'Yahoo data has not been synced yet.'
+    yahoo = None
+    yahoo_error = None
+
+    try:
+        yahoo_data = refresh_yahoo()
+        yahoo = build_yahoo_matchup(yahoo_data)
+
+        if not yahoo:
+            yahoo_error = 'Yahoo data could not be converted into a matchup.'
+
+    except Exception as e:
+        yahoo_error = str(e)
 
     return {
         'slates': slates,
