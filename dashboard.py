@@ -9,22 +9,48 @@ from sleeper import build_sleeper_matchup
 from yahoo_sync_store import refresh_yahoo
 
 
-def yahoo_player(player):
+def yahoo_player(player, lookup):
+    team = str(player.get('team') or '').upper()
+    game = lookup.get(team, {})
+
     return {
         'name': player.get('name'),
-        'slot': player.get('slot') or player.get('position') or '',
+        'slot': (
+            player.get('slot')
+            or player.get('position')
+            or ''
+        ),
         'actual': player.get('points'),
         'projected': player.get('projected_points'),
         'injury': player.get('injury_status'),
-        'game_status': player.get('game_status'),
+        'game_status': game.get(
+            'game_status',
+            player.get('game_status', ''),
+        ),
+        'status_detail': game.get('status_detail', ''),
         'status': player.get('status'),
-        'nfl_team': player.get('team'),
-        'opponent': player.get('opponent'),
-        'game_time': player.get('game_time'),
+        'nfl_team': game.get(
+            'team',
+            player.get('team', ''),
+        ),
+        'opponent': game.get(
+            'opponent',
+            player.get('opponent', ''),
+        ),
+        'game_time': game.get(
+            'game_time',
+            player.get('game_time', ''),
+        ),
+        'pro_team_id': game.get('team_id'),
     }
 
 
-def yahoo_team(abbrev, team_name, players):
+def yahoo_team(abbrev, team_name, players, lookup):
+    normalized_players = [
+        yahoo_player(player, lookup)
+        for player in players
+    ]
+
     return {
         'abbrev': abbrev,
         'team_name': team_name,
@@ -33,11 +59,11 @@ def yahoo_team(abbrev, team_name, players):
             for p in players
         ),
         'projected_total': None,
-        'players': [yahoo_player(p) for p in players],
+        'players': normalized_players,
     }
 
 
-def build_yahoo_matchup(data):
+def build_yahoo_matchup(data, lookup):
     if not data:
         return None
 
@@ -52,11 +78,13 @@ def build_yahoo_matchup(data):
             data.get('team_name') or 'Yahoo',
             data.get('team_name') or 'Yahoo',
             roster,
+            lookup,
         ),
         'opponent': yahoo_team(
             matchup.get('opponent') or 'Opponent',
             matchup.get('opponent') or 'Opponent',
             opponent_roster,
+            lookup,
         ),
         'actual_total': matchup.get('my_score'),
         'opponent_actual_total': matchup.get('opp_score'),
@@ -92,10 +120,15 @@ def build_dashboard():
 
     try:
         yahoo_data = refresh_yahoo()
-        yahoo = build_yahoo_matchup(yahoo_data)
+        yahoo = build_yahoo_matchup(
+            yahoo_data,
+            lookup,
+        )
 
         if not yahoo:
-            yahoo_error = 'Yahoo data could not be converted into a matchup.'
+            yahoo_error = (
+                'Yahoo data could not be converted into a matchup.'
+            )
 
     except Exception as e:
         yahoo_error = str(e)

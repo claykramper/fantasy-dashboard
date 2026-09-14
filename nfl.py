@@ -1,59 +1,277 @@
-import time
-from datetime import datetime,timedelta
+from datetime import datetime, timedelta
+
 import requests
-from config import ESPN_SCOREBOARD_URL,LOCAL_TIMEZONE
+
+from config import ESPN_SCOREBOARD_URL, LOCAL_TIMEZONE
+
 
 def get_nfl_schedule():
-    games=[]; today=datetime.now(LOCAL_TIMEZONE).date()
-    for offset in range(8):
-        day=today+timedelta(days=offset)
+    """
+    Return games belonging to the current fantasy/NFL week.
+
+    NFL fantasy weeks run from Thursday through Monday.
+    On Tuesday/Wednesday, we move forward to the upcoming Thursday.
+    """
+
+    now = datetime.now(LOCAL_TIMEZONE)
+    today = now.date()
+
+    # Thursday = 3
+    # Friday = 4
+    # Saturday = 5
+    # Sunday = 6
+    # Monday = 0
+    # Tuesday = 1
+    # Wednesday = 2
+
+    weekday = today.weekday()
+
+    if weekday in (3, 4, 5, 6, 0):
+        # Thursday through Monday:
+        # use the most recent Thursday.
+        days_since_thursday = (weekday - 3) % 7
+        week_start = today - timedelta(days=days_since_thursday)
+    else:
+        # Tuesday/Wednesday:
+        # use the upcoming Thursday.
+        days_until_thursday = (3 - weekday) % 7
+        week_start = today + timedelta(days=days_until_thursday)
+
+    week_end = week_start + timedelta(days=4)
+
+    games = []
+
+    for offset in range(5):
+        day = week_start + timedelta(days=offset)
+
         try:
-            r=requests.get(ESPN_SCOREBOARD_URL,params={'dates':day.strftime('%Y%m%d')},timeout=20); r.raise_for_status(); data=r.json()
-        except Exception: continue
-        for event in data.get('events',[]):
-            comps=event.get('competitions',[])
-            if not comps: continue
-            comp=comps[0]; competitors=comp.get('competitors',[])
-            if len(competitors)<2: continue
-            home=next((c for c in competitors if c.get('homeAway')=='home'),competitors[0]); away=next((c for c in competitors if c.get('homeAway')=='away'),competitors[1])
-            kickoff_text=event.get('date') or comp.get('date')
-            if not kickoff_text: continue
-            try: kickoff=datetime.fromisoformat(kickoff_text.replace('Z','+00:00'))
-            except ValueError: continue
-            st=comp.get('status',{}).get('type',{})
-            games.append({'id':str(event.get('id')),'kickoff':kickoff,'home':{'id':str(home.get('id','')),'abbreviation':home.get('team',{}).get('abbreviation','')},'away':{'id':str(away.get('id','')),'abbreviation':away.get('team',{}).get('abbreviation','')},'status':st.get('name',''),'status_detail':st.get('detail',st.get('shortDetail',''))})
-    games.sort(key=lambda g:g['kickoff']); return games
+            response = requests.get(
+                ESPN_SCOREBOARD_URL,
+                params={'dates': day.strftime('%Y%m%d')},
+                timeout=20,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception:
+            continue
+
+        for event in data.get('events', []):
+            competitions = event.get('competitions', [])
+
+            if not competitions:
+                continue
+
+            competition = competitions[0]
+            competitors = competition.get('competitors', [])
+
+            if len(competitors) < 2:
+                continue
+
+            home = next(
+                (
+                    c for c in competitors
+                    if c.get('homeAway') == 'home'
+                ),
+                competitors[0],
+            )
+
+            away = next(
+                (
+                    c for c in competitors
+                    if c.get('homeAway') == 'away'
+                ),
+                competitors[1],
+            )
+
+            kickoff_text = (
+                event.get('date')
+                or competition.get('date')
+            )
+
+            if not kickoff_text:
+                continue
+
+            try:
+                kickoff = datetime.fromisoformat(
+                    kickoff_text.replace('Z', '+00:00')
+                )
+            except ValueError:
+                continue
+
+            status = competition.get('status', {}).get('type', {})
+
+            games.append({
+                'id': str(event.get('id')),
+                'kickoff': kickoff,
+                'home': {
+                    'id': str(home.get('id', '')),
+                    'abbreviation': (
+                        home.get('team', {}).get('abbreviation', '')
+                    ),
+                },
+                'away': {
+                    'id': str(away.get('id', '')),
+                    'abbreviation': (
+                        away.get('team', {}).get('abbreviation', '')
+                    ),
+                },
+                'status': status.get('name', ''),
+                'status_detail': status.get(
+                    'detail',
+                    status.get('shortDetail', ''),
+                ),
+            })
+
+    # Remove accidental duplicates.
+    unique = {}
+
+    for game in games:
+        unique[game['id']] = game
+
+    games = list(unique.values())
+    games.sort(key=lambda g: g['kickoff'])
+
+    return games
+
 
 def group_games_into_slates(games):
-    if not games:return []
-    slates=[]; current=None
-    for game in sorted(games,key=lambda g:g['kickoff']):
-        if current is None or (game['kickoff']-current['kickoff']).total_seconds()>2700:
-            current={'kickoff':game['kickoff'],'games':[game]}; slates.append(current)
-        else: current['games'].append(game)
+    if not games:
+        return []
+
+    slates = []
+    current = None
+
+    for game in sorted(games, key=lambda g: g['kickoff']):
+        if (
+            current is None
+            or (
+                game['kickoff'] - current['kickoff']
+            ).total_seconds() > 2700
+        ):
+            current = {
+                'kickoff': game['kickoff'],
+                'games': [game],
+            }
+            slates.append(current)
+        else:
+            current['games'].append(game)
+
     return slates
 
-def format_slate_label(kickoff): return kickoff.astimezone(LOCAL_TIMEZONE).strftime('%a %I:%M %p').lstrip('0')
-def format_game_time(kickoff): return kickoff.astimezone(LOCAL_TIMEZONE).strftime('%I:%M %p').lstrip('0')
+
+def format_slate_label(kickoff):
+    return (
+        kickoff
+        .astimezone(LOCAL_TIMEZONE)
+        .strftime('%a %I:%M %p')
+        .lstrip('0')
+    )
+
+
+def format_game_time(kickoff):
+    return (
+        kickoff
+        .astimezone(LOCAL_TIMEZONE)
+        .strftime('%I:%M %p')
+        .lstrip('0')
+    )
+
 
 def build_slate_data(games):
-    now=datetime.now(LOCAL_TIMEZONE); out=[]
-    for i,slate in enumerate(group_games_into_slates(games)):
-        kickoff=slate['kickoff'].astimezone(LOCAL_TIMEZONE)
-        out.append({'id':i,'label':format_slate_label(slate['kickoff']),'date':kickoff.strftime('%Y-%m-%d'),'kickoff':kickoff.isoformat(),'timestamp':slate['kickoff'].timestamp(),'is_upcoming':slate['kickoff']>now,'games':[{'id':g['id'],'away':g['away']['abbreviation'],'home':g['home']['abbreviation'],'away_id':g['away']['id'],'home_id':g['home']['id'],'kickoff':g['kickoff'].isoformat(),'game_time':format_game_time(g['kickoff']),'game_status':g['status'],'status_detail':g['status_detail']} for g in slate['games']]})
+    now = datetime.now(LOCAL_TIMEZONE)
+    out = []
+
+    for index, slate in enumerate(
+        group_games_into_slates(games)
+    ):
+        kickoff = slate['kickoff'].astimezone(LOCAL_TIMEZONE)
+
+        out.append({
+            'id': index,
+            'label': format_slate_label(slate['kickoff']),
+            'date': kickoff.strftime('%Y-%m-%d'),
+            'kickoff': kickoff.isoformat(),
+            'timestamp': slate['kickoff'].timestamp(),
+            'is_upcoming': slate['kickoff'] > now,
+            'games': [
+                {
+                    'id': game['id'],
+                    'away': game['away']['abbreviation'],
+                    'home': game['home']['abbreviation'],
+                    'away_id': game['away']['id'],
+                    'home_id': game['home']['id'],
+                    'kickoff': game['kickoff'].isoformat(),
+                    'game_time': format_game_time(
+                        game['kickoff']
+                    ),
+                    'game_status': game['status'],
+                    'status_detail': game['status_detail'],
+                }
+                for game in slate['games']
+            ],
+        })
+
     return out
 
+
 def get_next_slate_index(slates):
-    now=time.time()
-    for s in slates:
-        if s['timestamp']>now:return s['id']
+    now = datetime.now(LOCAL_TIMEZONE).timestamp()
+
+    for slate in slates:
+        if slate['timestamp'] > now:
+            return slate['id']
+
     return None
 
+
 def build_game_lookup(games):
-    lookup={}
-    for g in games:
-        home_id=str(g['home']['id']); away_id=str(g['away']['id']); k=g['kickoff'].astimezone(LOCAL_TIMEZONE)
-        h={'team':g['home']['abbreviation'],'opponent':g['away']['abbreviation'],'opponent_id':away_id,'home':True,'kickoff':k,'game_time':format_game_time(g['kickoff']),'game_status':g['status'],'status_detail':g['status_detail']}
-        a={'team':g['away']['abbreviation'],'opponent':g['home']['abbreviation'],'opponent_id':home_id,'home':False,'kickoff':k,'game_time':format_game_time(g['kickoff']),'game_status':g['status'],'status_detail':g['status_detail']}
-        lookup[home_id]=h; lookup[away_id]=a; lookup[g['home']['abbreviation'].upper()]=h; lookup[g['away']['abbreviation'].upper()]=a
+    lookup = {}
+
+    for game in games:
+        home_id = str(game['home']['id'])
+        away_id = str(game['away']['id'])
+
+        kickoff = game['kickoff'].astimezone(LOCAL_TIMEZONE)
+
+        home_info = {
+            'team': game['home']['abbreviation'],
+            'opponent': game['away']['abbreviation'],
+            'opponent_id': away_id,
+            'team_id': home_id,
+            'home': True,
+            'kickoff': kickoff,
+            'game_time': format_game_time(kickoff),
+            'game_status': game['status'],
+            'status_detail': game['status_detail'],
+        }
+
+        away_info = {
+            'team': game['away']['abbreviation'],
+            'opponent': game['home']['abbreviation'],
+            'opponent_id': home_id,
+            'team_id': away_id,
+            'home': False,
+            'kickoff': kickoff,
+            'game_time': format_game_time(kickoff),
+            'game_status': game['status'],
+            'status_detail': game['status_detail'],
+        }
+
+        lookup[home_id] = home_info
+        lookup[away_id] = away_info
+
+        home_abbreviation = (
+            game['home']['abbreviation'] or ''
+        ).upper()
+
+        away_abbreviation = (
+            game['away']['abbreviation'] or ''
+        ).upper()
+
+        if home_abbreviation:
+            lookup[home_abbreviation] = home_info
+
+        if away_abbreviation:
+            lookup[away_abbreviation] = away_info
+
     return lookup
