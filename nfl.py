@@ -1,434 +1,59 @@
 import time
-from datetime import datetime, timedelta, time as dt_time
-
+from datetime import datetime,timedelta
 import requests
-
-from config import ESPN_SCOREBOARD_URL, LOCAL_TIMEZONE
-
-
-# ============================================================
-# TIME / FANTASY-WEEK HELPERS
-# ============================================================
-
-def parse_kickoff(value):
-    if not value:
-        return None
-
-    try:
-        parsed = datetime.fromisoformat(
-            value.replace("Z", "+00:00")
-        )
-    except (TypeError, ValueError):
-        return None
-
-    return parsed.astimezone(LOCAL_TIMEZONE)
-
-
-def format_slate_label(kickoff):
-    local = kickoff.astimezone(LOCAL_TIMEZONE)
-    return local.strftime("%a %I:%M %p").lstrip("0")
-
-
-def format_game_time(kickoff):
-    local = kickoff.astimezone(LOCAL_TIMEZONE)
-    return local.strftime("%I:%M %p").lstrip("0")
-
-
-def tuesday_start_for(date_value):
-    """Return the Tuesday 12:00 AM Central that owns this date."""
-    days_since_tuesday = (date_value.weekday() - 1) % 7
-    return date_value - timedelta(days=days_since_tuesday)
-
-
-def _is_final(game):
-    status = str(game.get("status") or "").upper()
-    detail = str(game.get("status_detail") or "").upper()
-
-    return (
-        "FINAL" in status
-        or "COMPLETED" in status
-        or "FINAL" in detail
-        or "END" in detail
-    )
-
-
-def current_fantasy_week_window(now=None, games=None):
-    """
-    Fantasy weeks run Tuesday 12:00 AM -> next Tuesday 12:00 AM.
-
-    Monday is therefore the final day of the fantasy week. We do NOT
-    roll over merely because the clock reaches Tuesday: if a Monday
-    night game is still live, the old fantasy week remains active.
-    The rollover happens as soon as all Monday games are final.
-
-    Returns:
-        week_start_datetime,
-        week_end_datetime,
-        week_key
-    """
-    now = now or datetime.now(LOCAL_TIMEZONE)
-    local_now = now.astimezone(LOCAL_TIMEZONE)
-
-    candidate_date = tuesday_start_for(local_now.date())
-    candidate_start = datetime.combine(
-        candidate_date,
-        dt_time.min,
-        tzinfo=LOCAL_TIMEZONE,
-    )
-    candidate_end = candidate_start + timedelta(days=7)
-
-    # The Monday immediately before the candidate Tuesday is the
-    # final day of the previous fantasy week. If its games are still
-    # active, retain the previous week even though it is technically
-    # Tuesday after midnight.
-    monday_date = candidate_date - timedelta(days=1)
-
-    monday_games = []
-    if games:
-        for game in games:
-            kickoff = game.get("kickoff")
-            if not kickoff:
-                continue
-
-            local_kickoff = kickoff.astimezone(LOCAL_TIMEZONE)
-
-            if local_kickoff.date() == monday_date:
-                monday_games.append(game)
-
-    if monday_games and not all(_is_final(game) for game in monday_games):
-        previous_start = candidate_start - timedelta(days=7)
-        previous_end = candidate_start
-        return (
-            previous_start,
-            previous_end,
-            previous_start.strftime("%Y-%m-%d"),
-        )
-
-    return (
-        candidate_start,
-        candidate_end,
-        candidate_start.strftime("%Y-%m-%d"),
-    )
-
-
-def filter_games_to_current_fantasy_week(games, now=None):
-    """Return only games belonging to the current fantasy week."""
-    week_start, week_end, _ = current_fantasy_week_window(
-        now=now,
-        games=games,
-    )
-
-    output = []
-
-    for game in games:
-        kickoff = game.get("kickoff")
-        if not kickoff:
-            continue
-
-        local_kickoff = kickoff.astimezone(
-            LOCAL_TIMEZONE
-        )
-
-        if week_start <= local_kickoff < week_end:
-            output.append(game)
-
-    return output
-
-
-# ============================================================
-# NFL SCHEDULE
-# ============================================================
+from config import ESPN_SCOREBOARD_URL,LOCAL_TIMEZONE
 
 def get_nfl_schedule():
-    """
-    Fetch enough history for Games Completed and enough future
-    schedule for the current fantasy week.
-
-    The returned list is then filtered to ONLY the active
-    Tuesday-to-Tuesday fantasy week.
-    """
-    games = []
-
-    today = datetime.now(
-        LOCAL_TIMEZONE
-    ).date()
-
-    # Load recent past + future so we can determine the Monday
-    # rollover and retain current-week completed games.
-    for offset in range(-7, 9):
-        day = today + timedelta(days=offset)
-
+    games=[]; today=datetime.now(LOCAL_TIMEZONE).date()
+    for offset in range(8):
+        day=today+timedelta(days=offset)
         try:
-            response = requests.get(
-                ESPN_SCOREBOARD_URL,
-                params={
-                    "dates": day.strftime("%Y%m%d")
-                },
-                timeout=20,
-            )
-            response.raise_for_status()
-            data = response.json()
-        except Exception:
-            continue
-
-        for event in data.get("events", []):
-            competitions = event.get("competitions", [])
-            if not competitions:
-                continue
-
-            competition = competitions[0]
-            competitors = competition.get("competitors", [])
-
-            if len(competitors) < 2:
-                continue
-
-            home = next(
-                (
-                    competitor
-                    for competitor in competitors
-                    if competitor.get("homeAway") == "home"
-                ),
-                competitors[0],
-            )
-
-            away = next(
-                (
-                    competitor
-                    for competitor in competitors
-                    if competitor.get("homeAway") == "away"
-                ),
-                competitors[1],
-            )
-
-            # Competition date is the most specific kickoff value.
-            kickoff_text = (
-                competition.get("date")
-                or event.get("date")
-            )
-
-            kickoff = parse_kickoff(kickoff_text)
-            if kickoff is None:
-                continue
-
-            status_obj = competition.get("status", {})
-            status_type = status_obj.get("type", {})
-
-            home_team = home.get("team", {})
-            away_team = away.get("team", {})
-
-            games.append(
-                {
-                    "id": str(event.get("id")),
-                    "kickoff": kickoff,
-                    "home": {
-                        "id": str(home.get("id", "")),
-                        "abbreviation": home_team.get(
-                            "abbreviation", ""
-                        ),
-                        "display_name": home_team.get(
-                            "displayName", ""
-                        ),
-                    },
-                    "away": {
-                        "id": str(away.get("id", "")),
-                        "abbreviation": away_team.get(
-                            "abbreviation", ""
-                        ),
-                        "display_name": away_team.get(
-                            "displayName", ""
-                        ),
-                    },
-                    "status": status_type.get("name", ""),
-                    "status_detail": status_type.get(
-                        "detail",
-                        status_type.get(
-                            "shortDetail", ""
-                        ),
-                    ),
-                }
-            )
-
-    # Deduplicate events.
-    unique_games = {
-        game["id"]: game
-        for game in games
-    }
-
-    games = sorted(
-        unique_games.values(),
-        key=lambda game: game["kickoff"],
-    )
-
-    return filter_games_to_current_fantasy_week(
-        games
-    )
-
-
-# ============================================================
-# SLATE GROUPING
-# ============================================================
+            r=requests.get(ESPN_SCOREBOARD_URL,params={'dates':day.strftime('%Y%m%d')},timeout=20); r.raise_for_status(); data=r.json()
+        except Exception: continue
+        for event in data.get('events',[]):
+            comps=event.get('competitions',[])
+            if not comps: continue
+            comp=comps[0]; competitors=comp.get('competitors',[])
+            if len(competitors)<2: continue
+            home=next((c for c in competitors if c.get('homeAway')=='home'),competitors[0]); away=next((c for c in competitors if c.get('homeAway')=='away'),competitors[1])
+            kickoff_text=event.get('date') or comp.get('date')
+            if not kickoff_text: continue
+            try: kickoff=datetime.fromisoformat(kickoff_text.replace('Z','+00:00'))
+            except ValueError: continue
+            st=comp.get('status',{}).get('type',{})
+            games.append({'id':str(event.get('id')),'kickoff':kickoff,'home':{'id':str(home.get('id','')),'abbreviation':home.get('team',{}).get('abbreviation','')},'away':{'id':str(away.get('id','')),'abbreviation':away.get('team',{}).get('abbreviation','')},'status':st.get('name',''),'status_detail':st.get('detail',st.get('shortDetail',''))})
+    games.sort(key=lambda g:g['kickoff']); return games
 
 def group_games_into_slates(games):
-    if not games:
-        return []
-
-    games = sorted(
-        games,
-        key=lambda game: game["kickoff"],
-    )
-
-    slates = []
-    current = None
-
-    for game in games:
-        if current is None:
-            current = {
-                "kickoff": game["kickoff"],
-                "games": [game],
-            }
-            slates.append(current)
-            continue
-
-        elapsed = (
-            game["kickoff"]
-            - current["kickoff"]
-        ).total_seconds()
-
-        if elapsed <= 45 * 60:
-            current["games"].append(game)
-        else:
-            current = {
-                "kickoff": game["kickoff"],
-                "games": [game],
-            }
-            slates.append(current)
-
+    if not games:return []
+    slates=[]; current=None
+    for game in sorted(games,key=lambda g:g['kickoff']):
+        if current is None or (game['kickoff']-current['kickoff']).total_seconds()>2700:
+            current={'kickoff':game['kickoff'],'games':[game]}; slates.append(current)
+        else: current['games'].append(game)
     return slates
 
-
-# ============================================================
-# FRONT-END SLATE DATA
-# ============================================================
+def format_slate_label(kickoff): return kickoff.astimezone(LOCAL_TIMEZONE).strftime('%a %I:%M %p').lstrip('0')
+def format_game_time(kickoff): return kickoff.astimezone(LOCAL_TIMEZONE).strftime('%I:%M %p').lstrip('0')
 
 def build_slate_data(games):
-    now = datetime.now(LOCAL_TIMEZONE)
-    _, _, week_key = current_fantasy_week_window(
-        now=now,
-        games=games,
-    )
-
-    output = []
-
-    for index, slate in enumerate(
-        group_games_into_slates(games)
-    ):
-        kickoff = slate["kickoff"].astimezone(
-            LOCAL_TIMEZONE
-        )
-
-        output.append(
-            {
-                "id": index,
-                "label": format_slate_label(
-                    slate["kickoff"]
-                ),
-                "date": kickoff.strftime(
-                    "%Y-%m-%d"
-                ),
-                "kickoff": kickoff.isoformat(),
-                "timestamp": slate["kickoff"].timestamp(),
-                "is_upcoming": slate["kickoff"] > now,
-                "games": [
-                    {
-                        "id": game["id"],
-                        "away": game["away"]["abbreviation"],
-                        "home": game["home"]["abbreviation"],
-                        "away_id": game["away"]["id"],
-                        "home_id": game["home"]["id"],
-                        "kickoff": game["kickoff"].isoformat(),
-                        "game_time": format_game_time(
-                            game["kickoff"]
-                        ),
-                        "game_status": game["status"],
-                        "status_detail": game["status_detail"],
-                    }
-                    for game in slate["games"]
-                ],
-            }
-        )
-
-    return output, week_key
-
-
-# ============================================================
-# DEFAULT SLATE
-# ============================================================
+    now=datetime.now(LOCAL_TIMEZONE); out=[]
+    for i,slate in enumerate(group_games_into_slates(games)):
+        kickoff=slate['kickoff'].astimezone(LOCAL_TIMEZONE)
+        out.append({'id':i,'label':format_slate_label(slate['kickoff']),'date':kickoff.strftime('%Y-%m-%d'),'kickoff':kickoff.isoformat(),'timestamp':slate['kickoff'].timestamp(),'is_upcoming':slate['kickoff']>now,'games':[{'id':g['id'],'away':g['away']['abbreviation'],'home':g['home']['abbreviation'],'away_id':g['away']['id'],'home_id':g['home']['id'],'kickoff':g['kickoff'].isoformat(),'game_time':format_game_time(g['kickoff']),'game_status':g['status'],'status_detail':g['status_detail']} for g in slate['games']]})
+    return out
 
 def get_next_slate_index(slates):
-    now = time.time()
-
-    for slate in slates:
-        if slate["timestamp"] > now:
-            return slate["id"]
-
+    now=time.time()
+    for s in slates:
+        if s['timestamp']>now:return s['id']
     return None
 
-
-# ============================================================
-# GAME LOOKUP
-# ============================================================
-
-def build_game_lookup(nfl_games):
-    """
-    nfl_games contains ONLY the current fantasy week.
-
-    That is intentional: a player can never accidentally inherit
-    another week's kickoff or status, and bye-week players do not
-    get matched against a future/previous game.
-    """
-    lookup = {}
-
-    now = datetime.now(LOCAL_TIMEZONE)
-
-    for game in nfl_games:
-        kickoff = game["kickoff"].astimezone(
-            LOCAL_TIMEZONE
-        )
-
-        home_id = str(game["home"]["id"])
-        away_id = str(game["away"]["id"])
-
-        home_abbrev = game["home"]["abbreviation"]
-        away_abbrev = game["away"]["abbreviation"]
-
-        home_data = {
-            "team": home_abbrev,
-            "opponent": away_abbrev,
-            "opponent_id": away_id,
-            "home": True,
-            "kickoff": kickoff,
-            "game_time": format_game_time(kickoff),
-            "game_status": game["status"],
-            "status_detail": game["status_detail"],
-        }
-
-        away_data = {
-            "team": away_abbrev,
-            "opponent": home_abbrev,
-            "opponent_id": home_id,
-            "home": False,
-            "kickoff": kickoff,
-            "game_time": format_game_time(kickoff),
-            "game_status": game["status"],
-            "status_detail": game["status_detail"],
-        }
-
-        # There is only one game per team in the current fantasy
-        # week, so these mappings cannot be overwritten by a future
-        # week anymore.
-        lookup[home_id] = home_data
-        lookup[away_id] = away_data
-        lookup[home_abbrev.upper()] = home_data
-        lookup[away_abbrev.upper()] = away_data
-
+def build_game_lookup(games):
+    lookup={}
+    for g in games:
+        home_id=str(g['home']['id']); away_id=str(g['away']['id']); k=g['kickoff'].astimezone(LOCAL_TIMEZONE)
+        h={'team':g['home']['abbreviation'],'opponent':g['away']['abbreviation'],'opponent_id':away_id,'home':True,'kickoff':k,'game_time':format_game_time(g['kickoff']),'game_status':g['status'],'status_detail':g['status_detail']}
+        a={'team':g['away']['abbreviation'],'opponent':g['home']['abbreviation'],'opponent_id':home_id,'home':False,'kickoff':k,'game_time':format_game_time(g['kickoff']),'game_status':g['status'],'status_detail':g['status_detail']}
+        lookup[home_id]=h; lookup[away_id]=a; lookup[g['home']['abbreviation'].upper()]=h; lookup[g['away']['abbreviation'].upper()]=a
     return lookup
