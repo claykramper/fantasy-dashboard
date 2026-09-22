@@ -840,17 +840,9 @@ function renderPlayer(
         `;
     }
 
-    const projectionSource =
-        player.projection_source &&
-        player.projected != null
-            ? `
-                <span class="game-info">
-                    ${escapeHtml(
-                        player.projection_source
-                    )}
-                </span>
-            `
-            : '';
+    // Projection source is intentionally not displayed.
+    // Yahoo may use ESPN as a fallback for the projection value,
+    // but the source label should not add a third metadata line.
 
     const playerClass =
         finished
@@ -927,7 +919,6 @@ function renderPlayer(
 
                         ${game}
 
-                        ${projectionSource}
 
                     </div>
 
