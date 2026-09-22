@@ -328,14 +328,15 @@ def predict_yahoo_lineup(players):
 
 
 def display_position_group(player):
-    """Return the requested display group for ESPN/Sleeper without changing Yahoo."""
-    slot = player.get('slot') or player.get('roster_slot')
+    """Return the requested display group for ESPN/Sleeper."""
+    slot = str(player.get('slot') or player.get('roster_slot') or '').upper()
+    predicted_slot = str(player.get('predicted_slot') or '').upper()
     pos = position(player)
 
-    if is_bench_slot(slot) or player.get('bench'):
+    if is_bench_slot(slot) or player.get('bench') or slot in {'BENCH', 'BN'}:
         return 7
 
-    if is_flex_slot(slot) or str(player.get('predicted_slot') or '').upper() == 'FLEX':
+    if is_flex_slot(slot) or predicted_slot == 'FLEX':
         return 4
 
     order = {
@@ -355,7 +356,12 @@ def sort_players_for_display(players):
     if not players:
         return players
 
-    players.sort(key=display_position_group)
+    players.sort(
+        key=lambda player: (
+            display_position_group(player),
+            str(player.get('name') or '').lower(),
+        )
+    )
     return players
 
 
