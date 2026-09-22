@@ -36,23 +36,35 @@ def find_matchup(data,my_team):
             return next(team for team in data['teams'] if team['id']==opponent_id)
     raise RuntimeError('Could not find current matchup.')
 
+def _slot_id(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+def _position_from_player(player):
+    pos_id = player.get('defaultPositionId')
+    return {1:'QB', 2:'RB', 3:'WR', 4:'TE', 16:'D/ST'}.get(pos_id, '')
+
 def get_players(team):
     out=[]
     for entry_index,entry in enumerate(team.get('roster',{}).get('entries',[])):
-        slot_id=entry.get('lineupSlotId')
+        slot_id=_slot_id(entry.get('lineupSlotId'))
         player=entry.get('playerPoolEntry',{}).get('player',{})
         is_starter=slot_id in SLOT_NAMES
         out.append({
             'player_id':entry.get('playerId'),'name':player.get('fullName'),
             'slot':SLOT_NAMES.get(slot_id,'BENCH'),'lineup_slot_id':slot_id,
+            'position':_position_from_player(player),
             'starter':is_starter,'bench':not is_starter,
             'injury_status':player.get('injuryStatus'),
             'pro_team_id':str(player.get('proTeamId')) if player.get('proTeamId') is not None else None,
             '_entry_index':entry_index,
+            '_display_order': SLOT_ORDER.get(SLOT_NAMES.get(slot_id), 99) if is_starter else 99,
         })
     # ESPN's API roster-entry order is not guaranteed to match the lineup UI.
     # Sort ONLY ESPN by the actual lineupSlotId, with FLEX before K/DST.
-    return sorted(out,key=lambda p:(SLOT_ORDER.get(p['slot'],99) if p['starter'] else 99,p['_entry_index']))
+    return sorted(out,key=lambda p:(p['_display_order'],p['_entry_index']))
 
 def find_player_objects(data,player_id):
     out=[]
@@ -103,7 +115,7 @@ def build_espn_matchup(nfl_games):
             projected,actual,_=get_player_stats(data,player['player_id']); game=lookup.get(str(player.get('pro_team_id')), {})
             if player['starter'] and actual is not None: actual_total += actual
             if player['starter']: projected_total += actual if actual is not None else (projected or 0)
-            players.append({'name':player['name'],'slot':player['slot'],'points':actual if actual is not None else projected,'projected':projected,'actual':actual,'status':'LOCKED' if 'FINAL' in str(game.get('game_status','')).upper() else 'PROJECTED','injury':player['injury_status'] or '','pro_team_id':player['pro_team_id'],'nfl_team':game.get('team',''),'opponent':game.get('opponent',''),'game_time':game.get('game_time',''),'game_status':game.get('game_status',''),'status_detail':game.get('status_detail',''),'starter':player['starter'],'bench':player['bench']})
+            players.append({'name':player['name'],'slot':player['slot'],'position':player.get('position') or '','lineup_slot_id':player.get('lineup_slot_id'),'display_order':player.get('_display_order',99),'points':actual if actual is not None else projected,'projected':projected,'actual':actual,'status':'LOCKED' if 'FINAL' in str(game.get('game_status','')).upper() else 'PROJECTED','injury':player['injury_status'] or '','pro_team_id':player['pro_team_id'],'nfl_team':game.get('team',''),'opponent':game.get('opponent',''),'game_time':game.get('game_time',''),'game_status':game.get('game_status',''),'status_detail':game.get('status_detail',''),'starter':player['starter'],'bench':player['bench']})
         return {'id':team['id'],'name':team['name'],'abbrev':team['abbrev'],'league':'ESPN','players':players,'total':actual_total,'actual_total':actual_total,'projected_total':projected_total}
     my=build_team(my_team); opp=build_team(opponent)
     return {'platform':'ESPN','week':data['scoringPeriodId'],'my_team':my,'opponent':opp,'difference':my['actual_total']-opp['actual_total']}
