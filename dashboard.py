@@ -327,6 +327,52 @@ def predict_yahoo_lineup(players):
     return players
 
 
+def display_position_group(player):
+    """Return the requested display group for ESPN/Sleeper without changing Yahoo."""
+    slot = player.get('slot') or player.get('roster_slot')
+    pos = position(player)
+
+    if is_bench_slot(slot) or player.get('bench'):
+        return 7
+
+    if is_flex_slot(slot) or str(player.get('predicted_slot') or '').upper() == 'FLEX':
+        return 4
+
+    order = {
+        'QB': 0,
+        'RB': 1,
+        'WR': 2,
+        'TE': 3,
+        'K': 5,
+        'D/ST': 6,
+    }
+
+    return order.get(pos, 7)
+
+
+def sort_players_for_display(players):
+    """Order non-Yahoo rosters QB, RB, WR, TE, FLEX, K, D/ST, then bench."""
+    if not players:
+        return players
+
+    players.sort(key=display_position_group)
+    return players
+
+
+def sort_league_for_display(league):
+    """Apply display ordering to a Sleeper/ESPN league."""
+    if not league:
+        return league
+
+    for team_key in ('my_team', 'opponent'):
+        team = league.get(team_key)
+        if not team:
+            continue
+        sort_players_for_display(team.get('players') or [])
+
+    return league
+
+
 def yahoo_team(abbrev, team_name, players, lookup, espn_projection_lookup, usage_lookup):
     converted = [
         yahoo_player(p, lookup, espn_projection_lookup, usage_lookup)
@@ -416,6 +462,7 @@ def build_dashboard():
     try:
         sleeper = build_sleeper_matchup(lookup)
         attach_usage_to_league(sleeper, usage_lookup)
+        sort_league_for_display(sleeper)
     except Exception as e:
         sleeper_error = str(e)
 
@@ -424,6 +471,7 @@ def build_dashboard():
     try:
         espn = build_espn_matchup(nfl_games)
         attach_usage_to_league(espn, usage_lookup)
+        sort_league_for_display(espn)
     except Exception as e:
         espn_error = str(e)
 

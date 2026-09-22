@@ -1010,11 +1010,75 @@ def _empty_usage():
 
 class UsageLookup:
 
+    TEAM_ALIASES = {
+        'LAR': {'LAR', 'LA'},
+        'LA': {'LAR', 'LA'},
+        'LV': {'LV', 'OAK'},
+        'OAK': {'LV', 'OAK'},
+        'WSH': {'WSH', 'WAS'},
+        'WAS': {'WSH', 'WAS'},
+        'JAX': {'JAX', 'JAC'},
+        'JAC': {'JAX', 'JAC'},
+        'GB': {'GB', 'GNB'},
+        'GNB': {'GB', 'GNB'},
+        'KC': {'KC'},
+        'NE': {'NE'},
+        'SF': {'SF'},
+        'TB': {'TB'},
+        'NO': {'NO'},
+        'NYG': {'NYG'},
+        'NYJ': {'NYJ'},
+        'DAL': {'DAL'},
+        'PHI': {'PHI'},
+        'CHI': {'CHI'},
+        'DET': {'DET'},
+        'MIN': {'MIN'},
+        'ATL': {'ATL'},
+        'CAR': {'CAR'},
+        'CLE': {'CLE'},
+        'CIN': {'CIN'},
+        'BAL': {'BAL'},
+        'PIT': {'PIT'},
+        'IND': {'IND'},
+        'HOU': {'HOU'},
+        'TEN': {'TEN'},
+        'DEN': {'DEN'},
+        'LAC': {'LAC', 'SD'},
+        'SD': {'LAC', 'SD'},
+        'MIA': {'MIA'},
+        'BUF': {'BUF'},
+        'ARI': {'ARI'},
+        'SEA': {'SEA'},
+    }
+
     def __init__(
         self,
         players
     ):
         self.players = players
+
+    @classmethod
+    def _team_matches(cls, requested, actual):
+        requested = str(
+            requested or ''
+        ).upper().strip()
+
+        actual = str(
+            actual or ''
+        ).upper().strip()
+
+        if not requested or not actual:
+            return False
+
+        if requested == actual:
+            return True
+
+        aliases = cls.TEAM_ALIASES.get(
+            requested,
+            {requested}
+        )
+
+        return actual in aliases
 
     def get_usage(
         self,
@@ -1026,45 +1090,41 @@ class UsageLookup:
             position or ''
         ).upper()
 
-        team = str(
-            team or ''
-        ).upper()
-
         normalized = _normalize_name(
             name
         )
 
-        # /*
-        # Yahoo supplies position directly.
-        # Sleeper/ESPN sometimes don't.
-
-        # If a valid position is supplied, use the exact key first.
-        # If not, find the player by NFL team + normalized name and let the
-        # usage dataset supply the position.
-        # */
+        # First try the exact team/name/position combination.
         if position in {
             'RB',
             'WR',
             'TE'
         }:
-            direct = self.players.get(
-                (
-                    team,
-                    normalized,
-                    position
-                )
-            )
+            for key, value in self.players.items():
+                if (
+                    self._team_matches(
+                        team,
+                        key[0]
+                    )
+                    and
+                    key[1] == normalized
+                    and
+                    key[2] == position
+                ):
+                    return value
 
-            if direct:
-                return direct
-
-        # /*
         # Platform-independent fallback.
-        # */
+        # This deliberately allows LA/LAR and other known NFL
+        # abbreviation differences.
         for key, value in self.players.items():
             if (
-                key[0] == team and
-                key[1] == normalized and
+                self._team_matches(
+                    team,
+                    key[0]
+                )
+                and
+                key[1] == normalized
+                and
                 key[2] in {
                     'RB',
                     'WR',
