@@ -29,9 +29,7 @@ def get_sleeper_user():
 
 
 def get_sleeper_leagues(user_id):
-    return get(
-        f'/user/{user_id}/leagues/nfl/2026'
-    )
+    return get(f'/user/{user_id}/leagues/nfl/2026')
 
 
 def get_sleeper_state():
@@ -51,9 +49,7 @@ def get_sleeper_users(league_id):
 
 
 def get_sleeper_matchups(league_id, week):
-    return get(
-        f'/league/{league_id}/matchups/{week}'
-    )
+    return get(f'/league/{league_id}/matchups/{week}')
 
 
 def get_sleeper_players():
@@ -68,15 +64,12 @@ def get_sleeper_players():
 
     PLAYER_CACHE = get('/players/nfl')
     PLAYER_CACHE_TIME = time.time()
-
     return PLAYER_CACHE
 
 
 def choose_league(leagues):
     if not leagues:
-        raise RuntimeError(
-            'No Sleeper NFL leagues found.'
-        )
+        raise RuntimeError('No Sleeper NFL leagues found.')
 
     return next(
         (
@@ -98,7 +91,6 @@ def num(value):
 def rows(data):
     if isinstance(data, dict):
         return data
-
     if isinstance(data, list):
         return {
             str(item['player_id']): item
@@ -108,23 +100,14 @@ def rows(data):
                 and item.get('player_id') is not None
             )
         }
-
     return {}
 
 
 def stat_data(row):
-    """
-    Sleeper projection/stat responses can contain the actual
-    fantasy statistics either directly on the player row or
-    inside a nested 'stats' object.
-
-    Normalize both formats so scoring works with either response.
-    """
     if not isinstance(row, dict):
         return None
 
     nested = row.get('stats')
-
     if isinstance(nested, dict):
         return nested
 
@@ -133,27 +116,20 @@ def stat_data(row):
 
 def position(player):
     positions = player.get('fantasy_positions') or []
-
     if positions:
         return positions[0]
-
     return player.get('position', '')
 
 
 def points(stats, scoring, pos):
     stats = stat_data(stats)
-
     if not isinstance(stats, dict):
         return None
 
     total = 0.0
-
     for key, value in scoring.items():
         if key in stats:
-            total += (
-                num(stats[key])
-                * num(value)
-            )
+            total += num(stats[key]) * num(value)
 
     bonus = {
         'RB': 'bonus_rec_rb',
@@ -162,52 +138,26 @@ def points(stats, scoring, pos):
     }.get(str(pos).upper())
 
     if bonus and bonus in scoring:
-        total += (
-            num(stats.get('rec'))
-            * num(scoring[bonus])
-        )
+        total += num(stats.get('rec')) * num(scoring[bonus])
 
     return round(total, 2)
 
 
-def score(
-    player_id,
-    player,
-    projections,
-    actual,
-    scoring,
-):
-    projection_row = rows(projections).get(
-        str(player_id)
-    )
-
-    actual_row = rows(actual).get(
-        str(player_id)
-    )
-
+def score(player_id, player, projections, actual, scoring):
+    projection_row = rows(projections).get(str(player_id))
+    actual_row = rows(actual).get(str(player_id))
     pos = position(player)
 
     projected = (
-        points(
-            projection_row,
-            scoring,
-            pos,
-        )
+        points(projection_row, scoring, pos)
         if projection_row
         else None
     )
-
     real = (
-        points(
-            actual_row,
-            scoring,
-            pos,
-        )
+        points(actual_row, scoring, pos)
         if (
             actual_row
-            and num(
-                stat_data(actual_row).get('gp')
-            ) > 0
+            and num(stat_data(actual_row).get('gp')) > 0
         )
         else None
     )
@@ -216,10 +166,7 @@ def score(
 
 
 def game_info(team, lookup):
-    game = lookup.get(
-        str(team or '').upper()
-    )
-
+    game = lookup.get(str(team or '').upper())
     if not game:
         return {
             'team': team or '',
@@ -235,14 +182,8 @@ def game_info(team, lookup):
         'opponent': game['opponent'],
         'game_time': game['game_time'],
         'game_status': game['game_status'],
-        'status_detail': game.get(
-            'status_detail',
-            '',
-        ),
-        'team_id': game.get(
-            'team_id',
-            '',
-        ),
+        'status_detail': game.get('status_detail', ''),
+        'team_id': game.get('team_id', ''),
     }
 
 
@@ -254,19 +195,26 @@ def build_players(
     actual,
     scoring,
     lookup,
+    roster_positions=None,
 ):
     out = []
+    starter_set = {str(player_id) for player_id in starter_ids if player_id not in (None, '0', 0)}
 
-    starter_set = {
-        str(player_id)
-        for player_id in starter_ids
-    }
+    # Sleeper's matchup.starters array is positional: its entries correspond
+    # to the league's roster_positions array. Use that relationship so a
+    # starter occupying FLEX is explicitly identified as FLEX instead of
+    # being mislabeled by his natural position.
+    starter_slot_by_id = {}
+    if roster_positions:
+        for index, player_id in enumerate(starter_ids):
+            if player_id in (None, '0', 0):
+                continue
+            if index >= len(roster_positions):
+                break
+            starter_slot_by_id[str(player_id)] = roster_positions[index]
 
     for player_id in player_ids:
-        player = players.get(
-            str(player_id)
-        )
-
+        player = players.get(str(player_id))
         if not player:
             continue
 
@@ -279,96 +227,48 @@ def build_players(
         )
 
         team = player.get('team') or ''
-
-        game = game_info(
-            team,
-            lookup,
-        )
-
-        finished = (
-            'FINAL'
-            in str(
-                game['game_status']
-            ).upper()
-        )
-
-        is_starter = (
-            str(player_id)
-            in starter_set
-        )
+        game = game_info(team, lookup)
+        finished = 'FINAL' in str(game['game_status']).upper()
+        is_starter = str(player_id) in starter_set
 
         name = (
             player.get('full_name')
             or ' '.join(
                 part
                 for part in [
-                    player.get(
-                        'first_name',
-                        '',
-                    ),
-                    player.get(
-                        'last_name',
-                        '',
-                    ),
+                    player.get('first_name', ''),
+                    player.get('last_name', ''),
                 ]
                 if part
             )
         )
 
+        slot = starter_slot_by_id.get(str(player_id)) if is_starter else 'BN'
+        if not slot:
+            slot = position(player) if is_starter else 'BN'
+
         out.append({
             'name': name,
-
-            'slot': (
-                position(player)
-                if is_starter
-                else 'BN'
-            ),
-
+            'slot': slot,
             'player_id': str(player_id),
-
             'nfl_team': game['team'],
-
             'opponent': game['opponent'],
-
             'game_time': game['game_time'],
-
             'game_status': game['game_status'],
-
-            'status_detail': game.get(
-                'status_detail',
-                '',
-            ),
-
-            'points': (
-                real
-                if real is not None
-                else projected
-            ),
-
+            'status_detail': game.get('status_detail', ''),
+            'points': real if real is not None else projected,
             'projected': projected,
-
             'actual': real,
-
-            'injury': (
-                player.get('injury_status')
-                or ''
-            ),
-
+            'injury': player.get('injury_status') or '',
             'status': (
                 'LOCKED'
                 if finished
-                else (
-                    'LIVE'
-                    if real is not None
-                    else 'PROJECTED'
-                )
+                else ('LIVE' if real is not None else 'PROJECTED')
             ),
-
             'pro_team_id': team,
-
             'starter': is_starter,
-
             'bench': not is_starter,
+            'position': position(player),
         })
 
     return out
@@ -376,15 +276,11 @@ def build_players(
 
 def tname(roster, users):
     metadata = roster.get('metadata') or {}
-
     if metadata.get('team_name'):
         return metadata['team_name']
 
     for user in users:
-        if (
-            user.get('user_id')
-            == roster.get('owner_id')
-        ):
+        if user.get('user_id') == roster.get('owner_id'):
             return (
                 user.get('display_name')
                 or user.get('username')
@@ -396,126 +292,69 @@ def tname(roster, users):
 
 def build_sleeper_matchup(lookup):
     user = get_sleeper_user()
-
-    league = choose_league(
-        get_sleeper_leagues(
-            user['user_id']
-        )
-    )
-
+    league = choose_league(get_sleeper_leagues(user['user_id']))
     league_id = league['league_id']
+    league_data = get_sleeper_league(league_id)
 
-    league_data = get_sleeper_league(
-        league_id
-    )
-
-    week = int(
-        get_sleeper_state().get('week')
-        or 1
-    )
-
-    rosters = get_sleeper_rosters(
-        league_id
-    )
-
-    users = get_sleeper_users(
-        league_id
-    )
-
-    matchups = get_sleeper_matchups(
-        league_id,
-        week,
-    )
+    week = int(get_sleeper_state().get('week') or 1)
+    rosters = get_sleeper_rosters(league_id)
+    users = get_sleeper_users(league_id)
+    matchups = get_sleeper_matchups(league_id, week)
 
     my_roster = next(
         roster
         for roster in rosters
-        if roster.get('owner_id')
-        == user['user_id']
+        if roster.get('owner_id') == user['user_id']
     )
 
     my_matchup = next(
         matchup
         for matchup in matchups
-        if matchup.get('roster_id')
-        == my_roster['roster_id']
+        if matchup.get('roster_id') == my_roster['roster_id']
     )
 
     opponent_matchup = next(
         matchup
         for matchup in matchups
         if (
-            matchup.get('matchup_id')
-            == my_matchup.get('matchup_id')
-            and matchup.get('roster_id')
-            != my_roster['roster_id']
+            matchup.get('matchup_id') == my_matchup.get('matchup_id')
+            and matchup.get('roster_id') != my_roster['roster_id']
         )
     )
 
     opponent_roster = next(
         roster
         for roster in rosters
-        if roster.get('roster_id')
-        == opponent_matchup['roster_id']
+        if roster.get('roster_id') == opponent_matchup['roster_id']
     )
 
     players = get_sleeper_players()
-
     cache_key = (2026, week)
 
     if cache_key not in PROJECTION_CACHE:
         response = requests.get(
             f'{SLEEPER_PROJECTIONS_URL}/2026/{week}',
-            params={
-                'season_type': 'regular'
-            },
+            params={'season_type': 'regular'},
             timeout=30,
         )
-
         response.raise_for_status()
-
-        PROJECTION_CACHE[cache_key] = (
-            time.time(),
-            response.json(),
-        )
+        PROJECTION_CACHE[cache_key] = (time.time(), response.json())
 
     if cache_key not in STATS_CACHE:
         response = requests.get(
             f'{SLEEPER_STATS_URL}/regular/2026/{week}',
             timeout=30,
         )
-
         response.raise_for_status()
+        STATS_CACHE[cache_key] = (time.time(), response.json())
 
-        STATS_CACHE[cache_key] = (
-            time.time(),
-            response.json(),
-        )
+    projections = PROJECTION_CACHE[cache_key][1]
+    actual = STATS_CACHE[cache_key][1]
+    scoring = league_data.get('scoring_settings') or {}
+    roster_positions = league_data.get('roster_positions') or []
 
-    projections = PROJECTION_CACHE[
-        cache_key
-    ][1]
-
-    actual = STATS_CACHE[
-        cache_key
-    ][1]
-
-    scoring = (
-        league_data.get(
-            'scoring_settings'
-        )
-        or {}
-    )
-
-    my_player_ids = (
-        my_roster.get('players')
-        or []
-    )
-
-    opponent_player_ids = (
-        opponent_roster.get('players')
-        or []
-    )
+    my_player_ids = my_roster.get('players') or []
+    opponent_player_ids = opponent_roster.get('players') or []
 
     my_players = build_players(
         my_player_ids,
@@ -525,8 +364,8 @@ def build_sleeper_matchup(lookup):
         actual,
         scoring,
         lookup,
+        roster_positions,
     )
-
     opponent_players = build_players(
         opponent_player_ids,
         opponent_matchup.get('starters') or [],
@@ -535,42 +374,22 @@ def build_sleeper_matchup(lookup):
         actual,
         scoring,
         lookup,
+        roster_positions,
     )
 
-    def teamdata(
-        roster,
-        matchup,
-        player_list,
-    ):
+    def teamdata(roster, matchup, player_list):
         return {
             'id': roster['roster_id'],
-
-            'name': tname(
-                roster,
-                users,
-            ),
-
-            'abbrev': tname(
-                roster,
-                users,
-            ),
-
+            'name': tname(roster, users),
+            'abbrev': tname(roster, users),
             'league': 'Sleeper',
-
             'players': player_list,
-
-            'total': num(
-                matchup.get('points')
-            ),
-
+            'total': num(matchup.get('points')),
             'actual_total': sum(
-                num(
-                    player.get('actual')
-                )
+                num(player.get('actual'))
                 for player in player_list
                 if player.get('starter')
             ),
-
             'projected_total': sum(
                 num(
                     player.get('actual')
@@ -582,12 +401,7 @@ def build_sleeper_matchup(lookup):
             ),
         }
 
-    my_team = teamdata(
-        my_roster,
-        my_matchup,
-        my_players,
-    )
-
+    my_team = teamdata(my_roster, my_matchup, my_players)
     opponent_team = teamdata(
         opponent_roster,
         opponent_matchup,
@@ -596,20 +410,11 @@ def build_sleeper_matchup(lookup):
 
     return {
         'platform': 'Sleeper',
-
         'week': week,
-
-        'league_name': (
-            league_data.get('name')
-            or league.get('name')
-        ),
-
+        'league_name': league_data.get('name') or league.get('name'),
         'my_team': my_team,
-
         'opponent': opponent_team,
-
         'difference': (
-            my_team['actual_total']
-            - opponent_team['actual_total']
+            my_team['actual_total'] - opponent_team['actual_total']
         ),
     }
