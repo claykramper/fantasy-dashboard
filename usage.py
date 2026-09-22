@@ -1,5 +1,6 @@
 import csv
 import io
+import logging
 import statistics
 import time
 from collections import defaultdict
@@ -13,14 +14,18 @@ STATS_URL = (
     'https://github.com/nflverse/nflverse-data/releases/download/'
     'stats_player/stats_player_week_{season}.csv'
 )
+
 SNAPS_URL = (
     'https://github.com/nflverse/nflverse-data/releases/download/'
     'snap_counts/snap_counts_{season}.csv'
 )
 
 CACHE_SECONDS = 900
+
 USAGE_CACHE = None
 USAGE_CACHE_TIME = 0
+
+LOG = logging.getLogger(__name__)
 
 
 def _num(value):
@@ -32,13 +37,20 @@ def _num(value):
 
 def _first(row, *keys):
     for key in keys:
-        if key in row and row.get(key) not in (None, ''):
+        if (
+            key in row and
+            row.get(key) not in (None, '')
+        ):
             return row.get(key)
+
     return None
 
 
 def _normalize_name(value):
-    text = str(value or '').strip().lower()
+    text = str(
+        value or ''
+    ).strip().lower()
+
     replacements = {
         '’': "'",
         '.': '',
@@ -46,126 +58,253 @@ def _normalize_name(value):
         '-': ' ',
         "'": '',
     }
+
     for old, new in replacements.items():
-        text = text.replace(old, new)
-    suffixes = {'jr', 'sr', 'ii', 'iii', 'iv', 'v'}
+        text = text.replace(
+            old,
+            new
+        )
+
+    suffixes = {
+        'jr',
+        'sr',
+        'ii',
+        'iii',
+        'iv',
+        'v',
+    }
+
     return ' '.join(
-        part for part in text.split()
+        part
+        for part in text.split()
         if part not in suffixes
     )
 
 
 def _position(row):
     return str(
-        _first(row, 'position_group', 'position') or ''
+        _first(
+            row,
+            'position_group',
+            'position'
+        ) or ''
     ).upper()
 
 
 def _stat_value(row, *keys):
-    return _num(_first(row, *keys))
+    return _num(
+        _first(
+            row,
+            *keys
+        )
+    )
 
 
 def _download_csv(url):
-    response = requests.get(url, timeout=30)
+    response = requests.get(
+        url,
+        timeout=30
+    )
+
     response.raise_for_status()
+
     response.encoding = 'utf-8'
-    return list(csv.DictReader(io.StringIO(response.text)))
+
+    return list(
+        csv.DictReader(
+            io.StringIO(
+                response.text
+            )
+        )
+    )
 
 
 def _load_raw_data():
-    season = str(ESPN_SEASON or '2026')
+    season = str(
+        ESPN_SEASON or '2026'
+    )
 
-    stats = _download_csv(STATS_URL.format(season=season))
-    snaps = _download_csv(SNAPS_URL.format(season=season))
+    stats = _download_csv(
+        STATS_URL.format(
+            season=season
+        )
+    )
+
+    try:
+        snaps = _download_csv(
+            SNAPS_URL.format(
+                season=season
+            )
+        )
+    except Exception as exc:
+        LOG.warning(
+            'Snap count data unavailable: %s',
+            exc
+        )
+
+        snaps = []
 
     return stats, snaps
 
 
 def _team_snap_totals(snaps):
     """
-    Infer the number of offensive snaps for each team/game from PFR's
-    player-level snap counts.
-
-    offense_pct is the player's percentage of the team's offensive snaps,
-    so offense_snaps / offense_pct recovers the team total. We use the
-    median of the available player-level estimates to avoid one unusual
-    row dominating the result.
+    Infer team offensive snaps from player-level snap counts.
     """
+
     estimates = defaultdict(list)
 
     for row in snaps:
-        team = str(row.get('team') or '').upper()
-        week = int(_num(row.get('week')))
-        game_type = str(row.get('game_type') or '').upper()
-        if not team or not week or game_type not in {'REG', 'REGULAR'}:
+        team = str(
+            row.get('team') or ''
+        ).upper()
+
+        week = int(
+            _num(
+                row.get('week')
+            )
+        )
+
+        game_type = str(
+            row.get('game_type') or ''
+        ).upper()
+
+        if (
+            not team or
+            not week or
+            game_type not in {
+                'REG',
+                'REGULAR'
+            }
+        ):
             continue
 
-        snaps_count = _stat_value(row, 'offense_snaps')
-        pct = _stat_value(row, 'offense_pct')
-        if snaps_count <= 0 or pct <= 0:
+        snaps_count = _stat_value(
+            row,
+            'offense_snaps',
+            'off_snp'
+        )
+
+        pct = _stat_value(
+            row,
+            'offense_pct',
+            'off_pct'
+        )
+
+        if (
+            snaps_count <= 0 or
+            pct <= 0
+        ):
             continue
 
         if pct <= 1:
             pct *= 100
 
-        if pct <= 0:
-            continue
-
-        estimates[(team, week)].append(
-            snaps_count / (pct / 100.0)
+        estimates[
+            (
+                team,
+                week
+            )
+        ].append(
+            snaps_count /
+            (pct / 100.0)
         )
 
     totals = {}
+
     for key, values in estimates.items():
         if values:
-            totals[key] = max(1.0, round(statistics.median(values)))
+            totals[key] = max(
+                1.0,
+                round(
+                    statistics.median(
+                        values
+                    )
+                )
+            )
 
     return totals
 
 
-def _build_weekly_records(stats, snaps):
-    """
-    Return normalized weekly player/team records.
-
-    The player-stat release is the source for carries, targets and passing
-    attempts. PFR snap counts are the source for offensive snap share.
-    """
-    snap_totals = _team_snap_totals(snaps)
+def _build_weekly_records(
+    stats,
+    snaps
+):
+    snap_totals = _team_snap_totals(
+        snaps
+    )
 
     snap_players = {}
+
     for row in snaps:
-        team = str(row.get('team') or '').upper()
-        week = int(_num(row.get('week')))
-        game_type = str(row.get('game_type') or '').upper()
-        name = _normalize_name(row.get('player'))
+        team = str(
+            row.get('team') or ''
+        ).upper()
+
+        week = int(
+            _num(
+                row.get('week')
+            )
+        )
+
+        game_type = str(
+            row.get('game_type') or ''
+        ).upper()
+
+        name = _normalize_name(
+            _first(
+                row,
+                'player',
+                'player_name'
+            )
+        )
 
         if (
-            not team
-            or not week
-            or game_type not in {'REG', 'REGULAR'}
-            or not name
+            not team or
+            not week or
+            game_type not in {
+                'REG',
+                'REGULAR'
+            } or
+            not name
         ):
             continue
 
-        key = (team, week, name)
+        key = (
+            team,
+            week,
+            name
+        )
+
         existing = snap_players.setdefault(
             key,
             {
                 'offense_snaps': 0.0,
                 'offense_pct': None,
-            },
+            }
         )
 
-        existing['offense_snaps'] += _stat_value(
+        existing[
+            'offense_snaps'
+        ] += _stat_value(
             row,
             'offense_snaps',
+            'off_snp'
         )
 
-        pct = _stat_value(row, 'offense_pct')
+        pct = _stat_value(
+            row,
+            'offense_pct',
+            'off_pct'
+        )
+
         if pct > 0:
             if pct <= 1:
                 pct *= 100
-            existing['offense_pct'] = pct
+
+            existing[
+                'offense_pct'
+            ] = pct
 
     player_week = defaultdict(
         lambda: {
@@ -184,70 +323,124 @@ def _build_weekly_records(stats, snaps):
         season_type = str(
             row.get('season_type') or ''
         ).upper()
-        if season_type != 'REG':
+
+        if (
+            season_type and
+            season_type != 'REG'
+        ):
             continue
 
-        team = str(row.get('team') or '').upper()
-        week = int(_num(row.get('week')))
+        team = str(
+            row.get('team') or ''
+        ).upper()
+
+        week = int(
+            _num(
+                row.get('week')
+            )
+        )
+
         name = _normalize_name(
             _first(
                 row,
                 'player_display_name',
-                'player_name',
+                'player_name'
             )
         )
 
-        if not team or not week or not name:
+        if (
+            not team or
+            not week or
+            not name
+        ):
             continue
 
-        key = (team, week, name)
+        key = (
+            team,
+            week,
+            name
+        )
+
         record = player_week[key]
 
         record['name'] = (
             _first(
                 row,
                 'player_display_name',
-                'player_name',
+                'player_name'
             )
             or record['name']
         )
+
         record['team'] = team
-        record['position'] = _position(row) or record['position']
+
+        record['position'] = (
+            _position(row)
+            or record['position']
+        )
+
         record['week'] = week
 
         record['carries'] += _stat_value(
             row,
             'carries',
             'rushing_attempts',
-            'rush_attempts',
+            'rush_attempts'
         )
-        record['targets'] += _stat_value(row, 'targets')
+
+        record['targets'] += _stat_value(
+            row,
+            'targets'
+        )
 
         if record['position'] == 'QB':
-            record['pass_attempts'] += _stat_value(
-                row,
-                'attempts',
-                'passing_attempts',
-                'pass_attempts',
+            record['pass_attempts'] += (
+                _stat_value(
+                    row,
+                    'attempts',
+                    'passing_attempts',
+                    'pass_attempts'
+                )
             )
-            record['sacks_suffered'] += _stat_value(
+
+            record[
+                'sacks_suffered'
+            ] += _stat_value(
                 row,
                 'sacks_suffered',
-                'sacks',
+                'sacks'
             )
 
-    # Add snap information and compute team-level totals.
     for key, record in player_week.items():
         team, week, name = key
-        snap = snap_players.get(key, {})
-        record['offense_snaps'] = _num(
-            snap.get('offense_snaps')
-        )
-        record['team_offense_snaps'] = _num(
-            snap_totals.get((team, week))
+
+        snap = snap_players.get(
+            key,
+            {}
         )
 
-    return list(player_week.values())
+        record[
+            'offense_snaps'
+        ] = _num(
+            snap.get(
+                'offense_snaps'
+            )
+        )
+
+        record[
+            'team_offense_snaps'
+        ] = _num(
+            snap_totals.get(
+                (
+                    team,
+                    week
+                )
+            )
+        )
+
+    return list(
+        player_week.values()
+    )
 
 
 def _aggregate(records):
@@ -269,14 +462,21 @@ def _aggregate(records):
     for row in records:
         key = (
             row['team'],
-            _normalize_name(row['name']),
+            _normalize_name(
+                row['name']
+            ),
             row['position'],
         )
+
         out = grouped[key]
+
         out['name'] = row['name']
         out['team'] = row['team']
         out['position'] = row['position']
-        out['weeks'].add(row['week'])
+
+        out['weeks'].add(
+            row['week']
+        )
 
         for field in (
             'carries',
@@ -291,101 +491,184 @@ def _aggregate(records):
     return grouped
 
 
-def _pct(numerator, denominator):
+def _pct(
+    numerator,
+    denominator
+):
     if denominator <= 0:
         return None
-    return round((numerator / denominator) * 100, 1)
+
+    return round(
+        (
+            numerator /
+            denominator
+        ) * 100,
+        1
+    )
 
 
 def _weekly_usage(records):
     by_week = defaultdict(list)
+
     for row in records:
-        by_week[(row['team'], row['week'])].append(row)
+        by_week[
+            (
+                row['team'],
+                row['week']
+            )
+        ].append(row)
 
     team_totals = {}
+
     for key, rows in by_week.items():
         team_totals[key] = {
-            'rushes': sum(r['carries'] for r in rows),
-            'targets': sum(r['targets'] for r in rows),
+            'rushes': sum(
+                r['carries']
+                for r in rows
+            ),
+            'targets': sum(
+                r['targets']
+                for r in rows
+            ),
             'pass_attempts': sum(
-                r['pass_attempts'] for r in rows
+                r['pass_attempts']
+                for r in rows
             ),
             'sacks': sum(
-                r['sacks_suffered'] for r in rows
+                r['sacks_suffered']
+                for r in rows
             ),
         }
 
     result = defaultdict(list)
 
-    for (team, week), rows in by_week.items():
-        totals = team_totals[(team, week)]
+    for (
+        team,
+        week
+    ), rows in by_week.items():
+
+        totals = team_totals[
+            (
+                team,
+                week
+            )
+        ]
+
         pass_plays = (
-            totals['pass_attempts']
-            + totals['sacks']
+            totals['pass_attempts'] +
+            totals['sacks']
         )
+
         total_plays = (
-            totals['rushes']
-            + pass_plays
+            totals['rushes'] +
+            pass_plays
         )
 
         run_pct = _pct(
             totals['rushes'],
-            total_plays,
+            total_plays
         )
+
         pass_pct = _pct(
             pass_plays,
-            total_plays,
+            total_plays
         )
 
         for row in rows:
             snap_share = _pct(
                 row['offense_snaps'],
-                row['team_offense_snaps'],
+                row['team_offense_snaps']
             )
+
             opportunity_rate = None
+
             if row['offense_snaps'] > 0:
                 opportunity_rate = _pct(
-                    row['carries'] + row['targets'],
-                    row['offense_snaps'],
+                    (
+                        row['carries'] +
+                        row['targets']
+                    ),
+                    row['offense_snaps']
+                )
+            elif total_plays > 0:
+                # /*
+                # Stats-only fallback. This keeps the usage tray populated
+                # if snap-count data is temporarily unavailable.
+                # */
+                opportunity_rate = _pct(
+                    (
+                        row['carries'] +
+                        row['targets']
+                    ),
+                    total_plays
                 )
 
             result[
                 (
                     row['team'],
-                    _normalize_name(row['name']),
-                    row['position'],
+                    _normalize_name(
+                        row['name']
+                    ),
+                    row['position']
                 )
             ].append(
                 {
                     'week': week,
-                    'snap_share': snap_share,
-                    'rush_share': _pct(
-                        row['carries'],
-                        totals['rushes'],
-                    ),
-                    'target_share': _pct(
-                        row['targets'],
-                        totals['targets'],
-                    ),
-                    'opportunity_rate': opportunity_rate,
-                    'run_pct': run_pct,
-                    'pass_pct': pass_pct,
+
+                    'snap_share':
+                        snap_share,
+
+                    'rush_share':
+                        _pct(
+                            row['carries'],
+                            totals['rushes']
+                        ),
+
+                    'target_share':
+                        _pct(
+                            row['targets'],
+                            totals['targets']
+                        ),
+
+                    'opportunity_rate':
+                        opportunity_rate,
+
+                    'run_pct':
+                        run_pct,
+
+                    'pass_pct':
+                        pass_pct,
                 }
             )
 
     for values in result.values():
-        values.sort(key=lambda item: item['week'])
+        values.sort(
+            key=lambda item:
+                item['week']
+        )
 
-    return result, team_totals
+    return (
+        result,
+        team_totals
+    )
 
 
 def _build_usage_data(records):
-    weekly, team_totals = _weekly_usage(records)
-    season = _aggregate(records)
+    weekly, team_totals = (
+        _weekly_usage(records)
+    )
 
-    # Competition is calculated from season-to-date usage.
-    rb_competition = defaultdict(list)
-    target_competition = defaultdict(list)
+    season = _aggregate(
+        records
+    )
+
+    rb_competition = (
+        defaultdict(list)
+    )
+
+    target_competition = (
+        defaultdict(list)
+    )
 
     for key, row in season.items():
         team = row['team']
@@ -394,48 +677,86 @@ def _build_usage_data(records):
         if position == 'RB':
             rush_total = sum(
                 value['carries']
-                for other_key, value in season.items()
+                for value in season.values()
                 if (
                     value['team'] == team
                     and value['position'] == 'RB'
                 )
             )
-            share = _pct(row['carries'], rush_total)
+
+            share = _pct(
+                row['carries'],
+                rush_total
+            )
+
             if row['carries'] > 0:
-                rb_competition[team].append(
+                rb_competition[
+                    team
+                ].append(
                     {
-                        'name': row['name'],
-                        'position': position,
-                        'share': share,
+                        'name':
+                            row['name'],
+                        'position':
+                            position,
+                        'share':
+                            share,
                     }
                 )
 
-        if position in {'RB', 'WR', 'TE'}:
+        if position in {
+            'RB',
+            'WR',
+            'TE'
+        }:
             target_total = sum(
                 value['targets']
-                for other_key, value in season.items()
-                if value['team'] == team
+                for value in season.values()
+                if (
+                    value['team'] == team
+                    and value['position']
+                    in {
+                        'RB',
+                        'WR',
+                        'TE'
+                    }
+                )
             )
-            share = _pct(row['targets'], target_total)
+
+            share = _pct(
+                row['targets'],
+                target_total
+            )
+
             if row['targets'] > 0:
-                target_competition[team].append(
+                target_competition[
+                    team
+                ].append(
                     {
-                        'name': row['name'],
-                        'position': position,
-                        'share': share,
+                        'name':
+                            row['name'],
+                        'position':
+                            position,
+                        'share':
+                            share,
                     }
                 )
 
-    for values in rb_competition.values():
+    for values in (
+        rb_competition.values()
+    ):
         values.sort(
-            key=lambda item: item['share'] or 0,
-            reverse=True,
+            key=lambda item:
+                item['share'] or 0,
+            reverse=True
         )
 
-    for values in target_competition.values():
+    for values in (
+        target_competition.values()
+    ):
         values.sort(
-            key=lambda item: item['share'] or 0,
-            reverse=True,
+            key=lambda item:
+                item['share'] or 0,
+            reverse=True
         )
 
     players = {}
@@ -443,9 +764,11 @@ def _build_usage_data(records):
     for key, row in season.items():
         team = row['team']
         position = row['position']
-        weekly_rows = weekly.get(key, [])
 
-        current = weekly_rows[-1] if weekly_rows else {}
+        weekly_rows = weekly.get(
+            key,
+            []
+        )
 
         if position == 'RB':
             rush_total = sum(
@@ -456,98 +779,190 @@ def _build_usage_data(records):
                     and value['position'] == 'RB'
                 )
             )
+
             rush_share = _pct(
                 row['carries'],
-                rush_total,
+                rush_total
             )
         else:
             rush_share = None
 
-        if position in {'WR', 'TE'}:
+        if position in {
+            'WR',
+            'TE'
+        }:
             target_total = sum(
                 value['targets']
                 for value in season.values()
-                if value['team'] == team
+                if (
+                    value['team'] == team
+                    and value['position']
+                    in {
+                        'RB',
+                        'WR',
+                        'TE'
+                    }
+                )
             )
+
             target_share = _pct(
                 row['targets'],
-                target_total,
+                target_total
             )
         else:
             target_share = None
 
-        offense = {
-            'run_pct': (
-                current.get('run_pct')
-                if current
-                else None
-            ),
-            'pass_pct': (
-                current.get('pass_pct')
-                if current
-                else None
-            ),
-        }
-
-        # Season-to-date team tendency is more stable and is what the
-        # main tray should display. The weekly value remains in history.
         team_weeks = [
             key[1]
             for key in team_totals
             if key[0] == team
         ]
-        total_rushes = sum(
-            team_totals[(team, week)]['rushes']
-            for week in team_weeks
-        )
-        total_pass_plays = sum(
-            team_totals[(team, week)]['pass_attempts']
-            + team_totals[(team, week)]['sacks']
-            for week in team_weeks
-        )
-        total_plays = total_rushes + total_pass_plays
 
-        offense['run_pct'] = _pct(
-            total_rushes,
-            total_plays,
+        total_rushes = sum(
+            team_totals[
+                (
+                    team,
+                    week
+                )
+            ]['rushes']
+            for week in team_weeks
         )
-        offense['pass_pct'] = _pct(
-            total_pass_plays,
-            total_plays,
+
+        total_pass_plays = sum(
+            team_totals[
+                (
+                    team,
+                    week
+                )
+            ]['pass_attempts']
+            +
+            team_totals[
+                (
+                    team,
+                    week
+                )
+            ]['sacks']
+            for week in team_weeks
         )
+
+        total_plays = (
+            total_rushes +
+            total_pass_plays
+        )
+
+        offense = {
+            'run_pct':
+                _pct(
+                    total_rushes,
+                    total_plays
+                ),
+
+            'pass_pct':
+                _pct(
+                    total_pass_plays,
+                    total_plays
+                ),
+        }
 
         season_snap_share = _pct(
             row['offense_snaps'],
-            row['team_offense_snaps'],
+            row['team_offense_snaps']
         )
 
         season_opportunity = None
+
         if row['offense_snaps'] > 0:
             season_opportunity = _pct(
-                row['carries'] + row['targets'],
-                row['offense_snaps'],
+                (
+                    row['carries'] +
+                    row['targets']
+                ),
+                row['offense_snaps']
             )
+        elif total_plays > 0:
+            season_opportunity = _pct(
+                (
+                    row['carries'] +
+                    row['targets']
+                ),
+                total_plays
+            )
+
+        # /*
+        # Target competition is the percentage of team RB/WR/TE targets
+        # going to players other than this player.
+        # */
+        if (
+            position in {'WR', 'TE'} and
+            target_share is not None
+        ):
+            target_competition_pct = round(
+                max(
+                    0.0,
+                    100.0 - target_share
+                ),
+                1
+            )
+        else:
+            target_competition_pct = None
 
         usage = {
             'available': True,
-            'position': position,
-            'team': team,
-            'snap_share': season_snap_share,
-            'rush_share': rush_share,
-            'target_share': target_share,
-            'opportunity_rate': season_opportunity,
-            'offense': offense,
+
+            'position':
+                position,
+
+            'team':
+                team,
+
+            'snap_share':
+                season_snap_share,
+
+            'rush_share':
+                rush_share,
+
+            'target_share':
+                target_share,
+
+            'target_competition':
+                target_competition_pct,
+
+            'opportunity_rate':
+                season_opportunity,
+
+            'offense':
+                offense,
+
             'competition': (
-                rb_competition.get(team, [])
+                rb_competition.get(
+                    team,
+                    []
+                )
                 if position == 'RB'
-                else target_competition.get(team, [])
-                if position in {'WR', 'TE'}
+                else target_competition.get(
+                    team,
+                    []
+                )
+                if position in {
+                    'WR',
+                    'TE'
+                }
                 else []
             )[:6],
-            'weeks': weekly_rows,
+
+            'weeks':
+                weekly_rows,
         }
 
-        players[(team, _normalize_name(row['name']), position)] = usage
+        players[
+            (
+                team,
+                _normalize_name(
+                    row['name']
+                ),
+                position
+            )
+        ] = usage
 
     return players
 
@@ -555,45 +970,106 @@ def _build_usage_data(records):
 def _empty_usage():
     return {
         'available': False,
-        'position': None,
-        'team': None,
-        'snap_share': None,
-        'rush_share': None,
-        'target_share': None,
-        'opportunity_rate': None,
+
+        'position':
+            None,
+
+        'team':
+            None,
+
+        'snap_share':
+            None,
+
+        'rush_share':
+            None,
+
+        'target_share':
+            None,
+
+        'target_competition':
+            None,
+
+        'opportunity_rate':
+            None,
+
         'offense': {
-            'run_pct': None,
-            'pass_pct': None,
+            'run_pct':
+                None,
+
+            'pass_pct':
+                None,
         },
-        'competition': [],
-        'weeks': [],
+
+        'competition':
+            [],
+
+        'weeks':
+            [],
     }
 
 
 class UsageLookup:
-    def __init__(self, players):
+
+    def __init__(
+        self,
+        players
+    ):
         self.players = players
 
-    def get_usage(self, name, team, position):
-        position = str(position or '').upper()
-        team = str(team or '').upper()
-        normalized = _normalize_name(name)
+    def get_usage(
+        self,
+        name,
+        team,
+        position
+    ):
+        position = str(
+            position or ''
+        ).upper()
 
-        if position not in {'RB', 'WR', 'TE'}:
-            return _empty_usage()
+        team = str(
+            team or ''
+        ).upper()
 
-        direct = self.players.get(
-            (team, normalized, position)
+        normalized = _normalize_name(
+            name
         )
-        if direct:
-            return direct
 
-        # Fallback for fantasy platforms that give a slightly different
-        # position/name spelling. Team + normalized name is still required.
+        # /*
+        # Yahoo supplies position directly.
+        # Sleeper/ESPN sometimes don't.
+
+        # If a valid position is supplied, use the exact key first.
+        # If not, find the player by NFL team + normalized name and let the
+        # usage dataset supply the position.
+        # */
+        if position in {
+            'RB',
+            'WR',
+            'TE'
+        }:
+            direct = self.players.get(
+                (
+                    team,
+                    normalized,
+                    position
+                )
+            )
+
+            if direct:
+                return direct
+
+        # /*
+        # Platform-independent fallback.
+        # */
         for key, value in self.players.items():
             if (
-                key[0] == team
-                and key[1] == normalized
+                key[0] == team and
+                key[1] == normalized and
+                key[2] in {
+                    'RB',
+                    'WR',
+                    'TE'
+                }
             ):
                 return value
 
@@ -605,21 +1081,58 @@ def build_usage_lookup():
     global USAGE_CACHE_TIME
 
     now = time.time()
+
     if (
-        USAGE_CACHE is not None
-        and now - USAGE_CACHE_TIME < CACHE_SECONDS
+        USAGE_CACHE is not None and
+        now - USAGE_CACHE_TIME
+        < CACHE_SECONDS
     ):
         return USAGE_CACHE
 
     try:
-        stats, snaps = _load_raw_data()
-        records = _build_weekly_records(stats, snaps)
-        players = _build_usage_data(records)
-        USAGE_CACHE = UsageLookup(players)
+        stats, snaps = (
+            _load_raw_data()
+        )
+
+        records = (
+            _build_weekly_records(
+                stats,
+                snaps
+            )
+        )
+
+        players = (
+            _build_usage_data(
+                records
+            )
+        )
+
+        if not players:
+            raise RuntimeError(
+                'NFL usage data loaded but produced no player records.'
+            )
+
+        USAGE_CACHE = UsageLookup(
+            players
+        )
+
         USAGE_CACHE_TIME = now
+
+        LOG.info(
+            'Built usage lookup with %d players',
+            len(players)
+        )
+
         return USAGE_CACHE
-    except Exception:
-        # Do not take the fantasy dashboard down if nflverse is temporarily
-        # unavailable. The next dashboard refresh will retry after the cache
-        # remains empty.
+
+    except Exception as exc:
+        LOG.exception(
+            'Unable to build NFL usage lookup: %s',
+            exc
+        )
+
+        # /*
+        # Do not cache an empty lookup.
+        # The next dashboard request will retry.
+        # */
         return UsageLookup({})
