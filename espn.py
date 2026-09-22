@@ -24,7 +24,7 @@ SLOT_NAMES = {
 }
 
 LINEUP_ORDER = ['QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'D/ST']
-
+LINEUP_ORDER_INDEX = {slot: index for index, slot in enumerate(LINEUP_ORDER)}
 
 def normalize_name(value):
     text = unicodedata.normalize('NFKD', str(value or ''))
@@ -33,7 +33,6 @@ def normalize_name(value):
     text = re.sub(r"[^a-z0-9 ]", '', text)
     suffixes = {'jr', 'sr', 'ii', 'iii', 'iv', 'v'}
     return ' '.join(x for x in text.split() if x not in suffixes)
-
 
 def get_league_data():
     response = requests.get(
@@ -51,7 +50,6 @@ def find_my_team(data):
         if MY_OWNER_GUID in team.get('owners', []):
             return team
     raise RuntimeError('Could not find your ESPN team.')
-
 
 def find_matchup(data, my_team):
     scoring_period = data['scoringPeriodId']
@@ -72,7 +70,6 @@ def find_matchup(data, my_team):
             )
     raise RuntimeError('Could not find current matchup.')
 
-
 def get_players(team):
     out = []
     for entry in team.get('roster', {}).get('entries', []):
@@ -92,8 +89,21 @@ def get_players(team):
                 else None
             ),
         })
+    # ESPN's roster entries are not guaranteed to arrive in display order.
+    # Sort only the ESPN roster here, using the actual lineup slot so FLEX
+    # players remain labeled/displayed as FLEX. Preserve API order within a
+    # slot so players at the same position are not otherwise reordered.
+    out = [
+        player for _, player in sorted(
+            enumerate(out),
+            key=lambda item: (
+                0 if item[1]['starter'] else 1,
+                LINEUP_ORDER_INDEX.get(item[1]['slot'], len(LINEUP_ORDER)),
+                item[0],
+            ),
+        )
+    ]
     return out
-
 
 def find_player_objects(data, player_id):
     out = []
@@ -111,7 +121,6 @@ def find_player_objects(data, player_id):
     walk(data)
     return out
 
-
 def get_player_stats(data, player_id):
     period = data['scoringPeriodId']
     projected = []
@@ -126,7 +135,6 @@ def get_player_stats(data, player_id):
                 or stat.get('scoringPeriodId') != period
             ):
                 continue
-
             if (
                 stat.get('statSourceId') == 1
                 and stat.get('statSplitTypeId') == 1
@@ -135,7 +143,6 @@ def get_player_stats(data, player_id):
                 projected.append(float(stat['appliedTotal']))
                 if not projected_stats:
                     projected_stats = stat.get('stats', {}) or {}
-
             if (
                 stat.get('statSourceId') == 0
                 and stat.get('statSplitTypeId') == 1
@@ -149,7 +156,6 @@ def get_player_stats(data, player_id):
         projected_stats,
     )
 
-
 def get_espn_projection_lookup(names):
     """Return ESPN weekly raw projected categories keyed by player name."""
     wanted = {normalize_name(name) for name in names if name}
@@ -160,7 +166,6 @@ def get_espn_projection_lookup(names):
     period = data.get('scoringPeriodId')
     result = {}
     seen = set()
-
     def walk(value):
         if isinstance(value, dict):
             player_obj = (
@@ -173,7 +178,6 @@ def get_espn_projection_lookup(names):
                 if isinstance(player_obj, dict)
                 else None
             )
-
             if full_name:
                 key = normalize_name(full_name)
                 if key in wanted and key not in seen:
@@ -189,7 +193,6 @@ def get_espn_projection_lookup(names):
                         ):
                             best = stat.get('stats', {}) or {}
                             break
-
                     if best is not None:
                         result[key] = {
                             'stats': best,
@@ -204,7 +207,6 @@ def get_espn_projection_lookup(names):
         elif isinstance(value, list):
             for child in value:
                 walk(child)
-
     walk(data)
     return result
 
@@ -219,7 +221,6 @@ def build_espn_matchup(nfl_games):
         players = []
         actual_total = 0.0
         projected_total = 0.0
-
         for player in get_players(team):
             projected, actual, _ = get_player_stats(
                 data,
@@ -233,7 +234,6 @@ def build_espn_matchup(nfl_games):
                 projected_total += (
                     actual if actual is not None else (projected or 0)
                 )
-
             players.append({
                 'name': player['name'],
                 'slot': player['slot'],
@@ -255,7 +255,6 @@ def build_espn_matchup(nfl_games):
                 'starter': player['starter'],
                 'bench': player['bench'],
             })
-
         return {
             'id': team['id'],
             'name': team['name'],
@@ -269,7 +268,6 @@ def build_espn_matchup(nfl_games):
 
     my = build_team(my_team)
     opp = build_team(opponent)
-
     return {
         'platform': 'ESPN',
         'week': data['scoringPeriodId'],
