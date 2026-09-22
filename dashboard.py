@@ -9,8 +9,8 @@ from nfl import (
     get_nfl_schedule,
 )
 from sleeper import build_sleeper_matchup
+from usage import build_usage_lookup
 from yahoo_sync_store import refresh_yahoo
-
 
 YAHOO_SCORING = {
     'pass_yd': 1 / 25,
@@ -149,8 +149,6 @@ def yahoo_projection_from_espn(stats, pos):
         )
 
     if pos == 'D/ST':
-        # ESPN exposes points-allowed as bucket stats. This maps them to
-        # the actual Yahoo buckets rather than using ESPN's fantasy total.
         pa_points = 0.0
         if s(89):
             pa_points += YAHOO_SCORING['dst_pa_0']
@@ -168,7 +166,6 @@ def yahoo_projection_from_espn(stats, pos):
             pa_points += YAHOO_SCORING['dst_pa_35_plus']
         else:
             pa_points += YAHOO_SCORING['dst_pa_21_27']
-
         return round(
             s(99) * YAHOO_SCORING['dst_sack']
             + s(95) * YAHOO_SCORING['dst_int']
@@ -186,18 +183,25 @@ def yahoo_projection_from_espn(stats, pos):
 
 def is_flex_slot(slot):
     value = str(slot or '').upper().replace('-', '').replace(' ', '')
-    return value in {'FLEX', 'W/R/T', 'WR/RB', 'RB/WR', 'W/T', 'WR/TE', 'RB/TE'} or 'FLEX' in value
+    return value in {
+        'FLEX',
+        'W/R/T',
+        'WR/RB',
+        'RB/WR',
+        'W/T',
+        'WR/TE',
+        'RB/TE',
+    } or 'FLEX' in value
 
 
 def is_bench_slot(slot):
     return str(slot or '').upper() in {'BN', 'BENCH', 'IR', 'IL', 'RESERVE'}
 
 
-def yahoo_player(player, lookup, espn_projection_lookup):
+def yahoo_player(player, lookup, espn_projection_lookup, usage_lookup):
     team = str(player.get('team') or '').upper()
     game = lookup.get(team, {})
     raw_projection = player.get('projected_points')
-
     try:
         projected = float(raw_projection) if raw_projection is not None else None
     except (TypeError, ValueError):
@@ -215,10 +219,16 @@ def yahoo_player(player, lookup, espn_projection_lookup):
                 source = 'ESPN → Yahoo'
 
     slot = player.get('slot') or player.get('roster_slot') or position(player)
+    player_position = position(player)
+    usage = usage_lookup.get_usage(
+        player.get('name'),
+        team,
+        player_position,
+    )
 
     return {
         'name': player.get('name'),
-        'position': position(player),
+        'position': player_position,
         'slot': slot,
         'actual': player.get('points'),
         'projected': projected,
@@ -235,6 +245,7 @@ def yahoo_player(player, lookup, espn_projection_lookup):
         'starter': False,
         'bench': True,
         'predicted_slot': 'BN',
+        'usage': usage,
     }
 
 
@@ -251,7 +262,6 @@ def predict_yahoo_lineup(players):
     def proj(p):
         return p.get('projected') if p.get('projected') is not None else -1
 
-    # Yahoo explicitly tells us which roster entries are W/R/T/FLEX.
     explicit_flex = sorted(
         [p for p in usable if is_flex_slot(p.get('slot'))],
         key=proj,
@@ -266,7 +276,12 @@ def predict_yahoo_lineup(players):
 
     def take(position_name, count, slot_name):
         candidates = sorted(
-            [p for p in usable if id(p) not in selected and p.get('position') == position_name],
+            [
+                p
+                for p in usable
+                if id(p) not in selected
+                and p.get('position') == position_name
+            ],
             key=proj,
             reverse=True,
         )[:count]
@@ -282,8 +297,6 @@ def predict_yahoo_lineup(players):
     take('K', 1, 'K')
     take('D/ST', 1, 'D/ST')
 
-    # If a fixed starter was explicitly provided and wasn't caught by the
-    # position parser, retain it. Otherwise it remains bench.
     for p in usable:
         if id(p) in selected:
             continue
@@ -293,23 +306,43 @@ def predict_yahoo_lineup(players):
             p['predicted_slot'] = p.get('slot') or p.get('position') or 'UTIL'
             selected.add(id(p))
 
-    order = {'QB': 0, 'RB': 1, 'WR': 2, 'TE': 3, 'FLEX': 4, 'K': 5, 'D/ST': 6, 'BN': 7}
-    players.sort(key=lambda p: (
-        0 if p.get('starter') else 1,
-        order.get(p.get('predicted_slot'), 8),
-        -proj(p),
-        str(p.get('name') or ''),
-    ))
+    order = {
+        'QB': 0,
+        'RB': 1,
+        'WR': 2,
+        'TE': 3,
+        'FLEX': 4,
+        'K': 5,
+        'D/ST': 6,
+        'BN': 7,
+    }
+    players.sort(
+        key=lambda p: (
+            0 if p.get('starter') else 1,
+            order.get(p.get('predicted_slot'), 8),
+            -proj(p),
+            str(p.get('name') or ''),
+        )
+    )
     return players
 
 
-def yahoo_team(abbrev, team_name, players, lookup, espn_projection_lookup):
-    converted = [yahoo_player(p, lookup, espn_projection_lookup) for p in players]
+def yahoo_team(abbrev, team_name, players, lookup, espn_projection_lookup, usage_lookup):
+    converted = [
+        yahoo_player(p, lookup, espn_projection_lookup, usage_lookup)
+        for p in players
+    ]
     predict_yahoo_lineup(converted)
     starters = [p for p in converted if p.get('starter')]
-    actual_total = sum(num(p.get('actual')) for p in starters if p.get('actual') is not None)
+    actual_total = sum(
+        num(p.get('actual'))
+        for p in starters
+        if p.get('actual') is not None
+    )
     projected_total = sum(
-        num(p.get('actual')) if p.get('actual') is not None and 'FINAL' in str(p.get('game_status') or '').upper()
+        num(p.get('actual'))
+        if p.get('actual') is not None
+        and 'FINAL' in str(p.get('game_status') or '').upper()
         else num(p.get('projected'))
         for p in starters
     )
@@ -322,9 +355,10 @@ def yahoo_team(abbrev, team_name, players, lookup, espn_projection_lookup):
     }
 
 
-def build_yahoo_matchup(data, lookup, espn_projection_lookup):
+def build_yahoo_matchup(data, lookup, espn_projection_lookup, usage_lookup):
     if not data:
         return None
+
     matchup = data.get('current_matchup') or {}
     return {
         'league_name': data.get('league_name'),
@@ -335,6 +369,7 @@ def build_yahoo_matchup(data, lookup, espn_projection_lookup):
             data.get('roster') or [],
             lookup,
             espn_projection_lookup,
+            usage_lookup,
         ),
         'opponent': yahoo_team(
             matchup.get('opponent') or 'Opponent',
@@ -342,6 +377,7 @@ def build_yahoo_matchup(data, lookup, espn_projection_lookup):
             matchup.get('opponent_roster') or [],
             lookup,
             espn_projection_lookup,
+            usage_lookup,
         ),
         'actual_total': matchup.get('my_score'),
         'opponent_actual_total': matchup.get('opp_score'),
@@ -351,15 +387,35 @@ def build_yahoo_matchup(data, lookup, espn_projection_lookup):
     }
 
 
+def attach_usage_to_league(league, usage_lookup):
+    if not league:
+        return league
+
+    for team_key in ('my_team', 'opponent'):
+        team = league.get(team_key)
+        if not team:
+            continue
+        for player in team.get('players') or []:
+            player['usage'] = usage_lookup.get_usage(
+                player.get('name'),
+                player.get('nfl_team') or player.get('team'),
+                player.get('position'),
+            )
+    return league
+
+
 def build_dashboard():
     nfl_games = get_nfl_schedule()
     slates = build_slate_data(nfl_games)
     lookup = build_game_lookup(nfl_games)
 
+    usage_lookup = build_usage_lookup()
+
     sleeper = None
     sleeper_error = None
     try:
         sleeper = build_sleeper_matchup(lookup)
+        attach_usage_to_league(sleeper, usage_lookup)
     except Exception as e:
         sleeper_error = str(e)
 
@@ -367,6 +423,7 @@ def build_dashboard():
     espn_error = None
     try:
         espn = build_espn_matchup(nfl_games)
+        attach_usage_to_league(espn, usage_lookup)
     except Exception as e:
         espn_error = str(e)
 
@@ -379,10 +436,17 @@ def build_dashboard():
             names.append(p.get('name'))
         names.extend(
             p.get('name')
-            for p in (yahoo_data.get('current_matchup') or {}).get('opponent_roster') or []
+            for p in (
+                yahoo_data.get('current_matchup') or {}
+            ).get('opponent_roster') or []
         )
         espn_projection_lookup = get_espn_projection_lookup(names)
-        yahoo = build_yahoo_matchup(yahoo_data, lookup, espn_projection_lookup)
+        yahoo = build_yahoo_matchup(
+            yahoo_data,
+            lookup,
+            espn_projection_lookup,
+            usage_lookup,
+        )
         if not yahoo:
             yahoo_error = 'Yahoo data could not be converted into a matchup.'
     except Exception as e:
